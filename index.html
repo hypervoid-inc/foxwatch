@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#efece6" />
+    <title>Foxwatch admin</title>
+    <link rel="icon" href="/fox.png" type="image/png" />
+    <script>
+      (function () {
+        try {
+          var k = "foxwatch-theme";
+          var t = localStorage.getItem(k);
+          if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          document.documentElement.setAttribute("data-theme", t);
+          document.documentElement.style.colorScheme = t;
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute("content", t === "dark" ? "#2c2b28" : "#efece6");
+        } catch (e) {}
+        requestAnimationFrame(function () {
+          document.documentElement.classList.add("theme-ready");
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/apps/web/src/main.tsx"></script>
+  </body>
+</html>

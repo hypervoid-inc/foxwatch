@@ -1,0 +1,59 @@
+{
+  // Placeholders only. Real D1/KV IDs live in gitignored wrangler.cloud.jsonc
+  // (`pnpm foxwatch init`, passed to wrangler via --config).
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "foxwatch",
+  "main": "./apps/worker/src/index.ts",
+  "compatibility_date": "2026-08-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true },
+  "vars": {
+    "ALLOW_HTTP_LOCAL": "false"
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "foxwatch",
+      "database_id": "local-dev-only",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "STATUS",
+      "id": "local-dev-only"
+    }
+  ],
+  "analytics_engine_datasets": [
+    {
+      "binding": "METRICS",
+      "dataset": "foxwatch_runs"
+    }
+  ],
+  "queues": {
+    "producers": [{ "binding": "ALERTS", "queue": "foxwatch-alerts" }],
+    "consumers": [{ "queue": "foxwatch-alerts", "max_batch_size": 10, "max_batch_timeout": 5 }]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SCHEDULER", "class_name": "Scheduler" },
+      { "name": "MONITOR", "class_name": "Monitor" },
+      { "name": "PROBE", "class_name": "Probe" },
+      { "name": "STATUS_HUB", "class_name": "StatusHub" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Scheduler", "Monitor", "Probe"] },
+    { "tag": "v2", "new_sqlite_classes": ["StatusHub"] }
+  ]
+}
