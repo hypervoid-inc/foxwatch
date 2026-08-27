@@ -16,6 +16,8 @@ const FORBIDDEN = new Set([
   "set-cookie",
 ]);
 
+const SENSITIVE = /^(authorization|proxy-authorization|x-api-key|api-key|x-auth-token)$/i;
+
 export function stripForbiddenHeaders(headers: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
@@ -46,6 +48,9 @@ export function resolveHeaders(
       if (!secret) return { headers: {}, missingSecret: name };
       resolved[key] = secret;
     } else if (typeof value === "string") {
+      // Match browser redirect safety: never forward credential-like literal
+      // headers to a host outside the explicit allowlist.
+      if (!attach && SENSITIVE.test(key)) continue;
       resolved[key] = value;
     }
   }

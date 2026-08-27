@@ -77,6 +77,18 @@ describe("defineConfig", () => {
     ).toThrow(/not in config.secrets/);
   });
 
+  it("rejects literal sensitive headers and unsafe retry settings", () => {
+    expect(() =>
+      defineConfig({
+        site: { name: "x" },
+        groups: [{ id: "g", name: "G", components: [{ id: "c", name: "C", checks: [http("a", { url: "https://example.com", headers: { Authorization: "Bearer plaintext" } })] }] }],
+      }),
+    ).toThrow(/must use secret/);
+    expect(() =>
+      defineConfig({ site: { name: "x" }, defaults: { retries: 8 }, groups: [] }),
+    ).toThrow(/retries/);
+  });
+
   it("parses YAML-like secret:NAME headers", () => {
     const cfg = configFromYamlLike({
       site: { name: "Acme" },

@@ -10,6 +10,8 @@ type Latest = {
   latencyMs: number | null;
   colo: string | null;
   errorClass: string | null;
+  errorSnippet?: string | null;
+  statusCode?: number | null;
   checkedAt: number;
 };
 
@@ -42,6 +44,10 @@ export function Checks({
     }
     if (res.data.skipped === "muted") {
       setError("This check is muted. Unmute it before running.");
+      return;
+    }
+    if (res.data.skipped === "maintenance") {
+      setError("This component is under maintenance. Checks are intentionally suppressed.");
       return;
     }
     await onChange();
@@ -107,8 +113,13 @@ export function Checks({
         ) : (
           <ul className="check-list">
             {monitors.map((m) => {
-              const worst = m.latest.some((l) => l.outcome === "fail") ? "bad" : m.latest.some((l) => l.outcome === "degraded") ? "warn" : m.latest.length ? "ok" : "empty";
+              const interval = Number(m.config.intervalMs ?? 60_000);
+              const timeout = m.type === "http" ? Number(m.config.timeoutMs ?? 10_000) * (Number(m.config.retries ?? 2) + 1) : Number(m.config.graceMs ?? 0);
+              const freshAfter = Date.now() - Math.max(interval * 2.5, interval + timeout + 30_000);
+              const freshLatest = m.latest.filter((latest) => latest.checkedAt >= freshAfter);
               const muted = m.mutedUntil != null && m.mutedUntil > Date.now();
+              const worst = muted ? "empty" : freshLatest.some((l) => l.outcome === "fail") ? "bad" : freshLatest.some((l) => l.outcome === "degraded") ? "warn" : freshLatest.length ? "ok" : "empty";
+              const confirming = freshLatest.some((latest) => latest.outcome === "fail") && m.confirmedOutcome !== "fail";
               const isSelected = selected === m.id;
               return (
                 <li
@@ -131,6 +142,8 @@ export function Checks({
                         {muted ? <span className="check-flag">Muted</span> : null}
                         {m.drifted ? <span className="check-flag">Drifted</span> : null}
                         {m.origin === "git" ? <span className="check-flag">Imported</span> : null}
+                        {m.latest.length > 0 && freshLatest.length === 0 ? <span className="check-flag">Stale</span> : null}
+                        {confirming ? <span className="check-flag">Confirming {m.consecutiveFails ?? 0}/{Number(m.config.confirmFails ?? 3)}</span> : null}
                       </p>
                       <p className="check-target">
                         {m.type === "http" ? (
@@ -147,9 +160,27 @@ export function Checks({
                       <button className="btn btn-secondary btn-sm" type="button" disabled={muted || busy === `run:${m.id}`} onClick={() => void run(m.id)}>
                         {busy === `run:${m.id}` ? "Running…" : "Run"}
                       </button>
-                      <button className="btn btn-secondary btn-sm" type="button" disabled={busy === `mute:${m.id}`} onClick={() => void mute(m.id, muted ? null : Date.now() + 3_600_000)}>
-                        {busy === `mute:${m.id}` ? "Saving…" : muted ? "Unmute" : "Mute 1h"}
-                      </button>
+                      {muted ? (
+                        <button className="btn btn-secondary btn-sm" type="button" disabled={busy === `mute:${m.id}`} onClick={() => void mute(m.id, null)}>
+                          {busy === `mute:${m.id}` ? "Saving…" : "Unmute"}
+                        </button>
+                      ) : (
+                        <select
+                          className="btn btn-secondary btn-sm"
+                          aria-label={`Mute ${m.name}`}
+                          value=""
+                          disabled={busy === `mute:${m.id}`}
+                          onChange={(e) => {
+                            const duration = Number(e.target.value);
+                            if (duration) void mute(m.id, Date.now() + duration);
+                          }}
+                        >
+                          <option value="">{busy === `mute:${m.id}` ? "Saving…" : "Mute"}</option>
+                          <option value={3_600_000}>1 hour</option>
+                          <option value={86_400_000}>24 hours</option>
+                          <option value={604_800_000}>7 days</option>
+                        </select>
+                      )}
                       <button className="btn btn-danger btn-sm" type="button" disabled={busy === `del:${m.id}`} onClick={() => setPendingDelete(m.id)}>
                         {busy === `del:${m.id}` ? "Deleting…" : "Delete"}
                       </button>
@@ -185,6 +216,7 @@ export function Checks({
         {editing?.componentId ? (
           <MaintenanceCard componentId={editing.componentId} componentName={editing.componentName} onChange={onChange} />
         ) : null}
+        {editing ? <RunHistory monitor={editing} /> : null}
       </aside>
       <ConfirmDialog
         open={pendingDelete != null}
@@ -198,6 +230,43 @@ export function Checks({
         }}
       />
     </div>
+  );
+}
+
+function RunHistory({ monitor }: { monitor: MonitorRow }) {
+  const [runs, setRuns] = useState<Latest[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    void api<{ runs: Latest[] }>(`/api/ops/monitors/${monitor.id}/runs?limit=5`).then((res) => {
+      if (res.ok) setRuns(res.data.runs);
+      setLoading(false);
+    });
+  }, [monitor.id, monitor.latest]);
+
+  return (
+    <section className="card overflow-hidden">
+      <div className="px-5 py-4">
+        <h2 className="section-title">Recent runs</h2>
+        <p className="section-copy">Last 5 probes. Confirmed after {Number(monitor.config.confirmFails ?? 3)} consecutive failures.</p>
+      </div>
+      {loading ? <p className="empty-note">Loading…</p> : runs.length === 0 ? <p className="empty-note">No runs recorded yet.</p> : (
+        <ul className="border-t border-line">
+          {runs.map((run, index) => (
+            <li key={`${run.checkedAt}-${run.region}-${index}`} className="run-item">
+              <div className="run-item-head">
+                <Mark status={outcomeMark(run.outcome)} />
+                <strong className="run-item-outcome">{outcomeLabel(run.outcome)}</strong>
+                <span className="run-item-latency">{run.latencyMs != null ? `${run.latencyMs}ms` : "—"}</span>
+              </div>
+              <p className="run-item-detail">{regionTitle(run.region)}{run.colo ? ` · ${run.colo}` : ""}{run.statusCode ? ` · HTTP ${run.statusCode}` : ""} · {new Date(run.checkedAt).toLocaleString()}</p>
+              {run.errorClass || run.errorSnippet ? <p className="run-item-error">{[run.errorClass, run.errorSnippet].filter(Boolean).join(": ")}</p> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -261,22 +330,23 @@ function MaintenanceCard({
   componentName: string;
   onChange: () => Promise<void>;
 }) {
-  const [active, setActive] = useState<MaintenanceWindow | null>(null);
+  const [windows, setWindows] = useState<MaintenanceWindow[]>([]);
   const [note, setNote] = useState("");
+  const [startAt, setStartAt] = useState(() => toLocalInput(Date.now() + 5 * 60 * 1000));
   const [endAt, setEndAt] = useState(() => toLocalInput(Date.now() + 2 * 60 * 60 * 1000));
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
   async function refresh() {
-    const res = await api<{ window: MaintenanceWindow | null }>(`/api/ops/components/${componentId}/maintenance`);
+    const res = await api<{ window: MaintenanceWindow | null; windows: MaintenanceWindow[] }>(`/api/ops/components/${componentId}/maintenance`);
     if (!res.ok) return;
-    setActive(res.data.window);
-    if (res.data.window) setNote(res.data.window.note);
+    setWindows(res.data.windows);
   }
 
   useEffect(() => {
     setError(null);
     setNote("");
+    setStartAt(toLocalInput(Date.now() + 5 * 60 * 1000));
     setEndAt(toLocalInput(Date.now() + 2 * 60 * 60 * 1000));
     void refresh();
   }, [componentId]);
@@ -285,30 +355,34 @@ function MaintenanceCard({
     e.preventDefault();
     setError(null);
     const parsed = new Date(endAt).getTime();
+    const parsedStart = new Date(startAt).getTime();
     setPending(true);
     const res = await api<{ window: MaintenanceWindow }>(`/api/ops/components/${componentId}/maintenance`, {
       method: "POST",
-      body: JSON.stringify({ note, endAt: parsed }),
+      body: JSON.stringify({ note, startAt: parsedStart, endAt: parsed }),
     });
     setPending(false);
     if (!res.ok) {
       setError(mutationError(res.error, "Could not start maintenance."));
       return;
     }
-    setActive(res.data.window);
+    setWindows((current) => [...current, res.data.window].sort((a, b) => a.startAt - b.startAt));
+    setNote("");
+    setStartAt(toLocalInput(Date.now() + 5 * 60 * 1000));
+    setEndAt(toLocalInput(Date.now() + 2 * 60 * 60 * 1000));
     await onChange();
   }
 
-  async function end() {
+  async function end(windowId: string) {
     setError(null);
     setPending(true);
-    const res = await api(`/api/ops/components/${componentId}/maintenance`, { method: "DELETE" });
+    const res = await api(`/api/ops/components/${componentId}/maintenance/${windowId}`, { method: "DELETE" });
     setPending(false);
     if (!res.ok) {
       setError(mutationError(res.error, "Could not end maintenance."));
       return;
     }
-    setActive(null);
+    setWindows((current) => current.filter((window) => window.id !== windowId));
     await onChange();
   }
 
@@ -317,32 +391,31 @@ function MaintenanceCard({
       <div>
         <h2 className="section-title">Maintenance</h2>
         <p className="section-copy">
-          Marks <span className="font-medium text-ink">{componentName}</span> as under maintenance on the public page. Does not change the outage banner.
+            Suppresses checks, alerts, and automated incidents for <span className="font-medium text-ink">{componentName}</span> during this window.
         </p>
       </div>
-      {active ? (
-        <>
-          <p className="text-sm">
-            Active until <time dateTime={new Date(active.endAt).toISOString()}>{new Date(active.endAt).toUTCString()}</time>
-          </p>
-          {active.note ? <p className="text-sm text-muted">{active.note}</p> : null}
-          <button className="btn btn-secondary w-fit" type="button" disabled={pending} onClick={() => void end()}>
-            {pending ? "Ending…" : "End now"}
-          </button>
-        </>
-      ) : (
-        <>
+      {windows.length ? (
+        <ul className="flex flex-col gap-2">
+          {windows.map((window) => {
+            const active = window.startAt <= Date.now() && Date.now() < window.endAt;
+            return <li key={window.id} className="rounded-lg border border-line p-3 text-sm"><p className="font-medium">{active ? "In progress" : "Scheduled"}</p><p className="mt-0.5 text-xs text-muted"><time dateTime={new Date(window.startAt).toISOString()}>{new Date(window.startAt).toLocaleString()}</time> – <time dateTime={new Date(window.endAt).toISOString()}>{new Date(window.endAt).toLocaleString()}</time></p>{window.note ? <p className="mt-1 text-sm text-muted">{window.note}</p> : null}<button className="check-quiet check-quiet-bad mt-1" type="button" disabled={pending} onClick={() => void end(window.id)}>{active ? "End now" : "Cancel"}</button></li>;
+          })}
+        </ul>
+      ) : null}
+      <>
           <Field label="Note (optional)" htmlFor="maint-note">
             <input id="maint-note" className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Deploying API v2" />
+          </Field>
+          <Field label="Start" htmlFor="maint-start">
+            <input id="maint-start" className="input" type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} required />
           </Field>
           <Field label="End" htmlFor="maint-end">
             <input id="maint-end" className="input" type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} required />
           </Field>
           <button className="btn btn-primary w-fit" disabled={pending} type="submit">
-            {pending ? "Starting…" : "Start maintenance"}
+            {pending ? "Scheduling…" : "Schedule maintenance"}
           </button>
-        </>
-      )}
+      </>
       {error ? <ErrorText>{error}</ErrorText> : null}
     </form>
   );

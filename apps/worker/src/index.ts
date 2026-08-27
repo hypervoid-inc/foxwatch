@@ -48,14 +48,21 @@ export default {
     const db = drizzle(env.DB, { schema });
     const channels = await db.select().from(schema.alertChannels);
     for (const msg of batch.messages) {
-      for (const ch of channels) {
+      const eligible = msg.body.channelId ? channels.filter((channel) => channel.id === msg.body.channelId) : channels;
+      const deliveries = await Promise.allSettled(eligible.map(async (ch) => {
+        const events = JSON.parse(ch.eventsJson) as unknown;
+        if (!Array.isArray(events)) throw new Error(`invalid alert channel ${ch.id}`);
         await deliverAlert(env, {
           type: ch.type,
           secretName: ch.secretName,
-          events: JSON.parse(ch.eventsJson) as string[],
+          events: events.map(String),
         }, msg.body);
+      }));
+      if (deliveries.some((delivery) => delivery.status === "rejected")) {
+        msg.retry();
+      } else {
+        msg.ack();
       }
-      msg.ack();
     }
   },
 } satisfies ExportedHandler<Env, AlertBody>;

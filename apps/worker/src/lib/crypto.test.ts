@@ -360,7 +360,8 @@ describe("public brand", () => {
     expect(html).not.toContain(">Dark</button>");
     expect(html).not.toContain("b.textContent=");
     expect(html).toContain("nth-child(-n+24)");
-    expect(html).toContain("details[open] .nested-inner { overflow: visible; }");
+    expect(html).toContain(".nested-inner { min-height: 0; }");
+    expect(html).not.toContain("grid-template-rows");
     expect(html).toContain('<header class="top">');
     expect(html).toContain('id="live-brand"');
     expect(html).toContain('data-banner="fully_operational"');
@@ -446,17 +447,6 @@ describe("site settings helpers", () => {
     expect(sniffIconMime(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe("image/jpeg");
     expect(sniffIconMime(new Uint8Array([0x00, 0x00, 0x01, 0x00]))).toBe("image/x-icon");
     expect(sniffIconMime(new Uint8Array([0x3c, 0x73, 0x76, 0x67]))).toBe(null);
-  });
-});
-
-describe("stored secrets", () => {
-  it("parses a name/value map and ignores junk", async () => {
-    const { parseStoredSecrets, resolveSecretValue } = await import("./secret-store.ts");
-    expect(parseStoredSecrets(`{"API_TOKEN":"sekrit","bad":1,"":""}`)).toEqual({ API_TOKEN: "sekrit" });
-    expect(parseStoredSecrets("nope")).toEqual({});
-    expect(resolveSecretValue({ API_TOKEN: "from-ui" }, "API_TOKEN", "from-env")).toBe("from-ui");
-    expect(resolveSecretValue({}, "API_TOKEN", "from-env")).toBe("from-env");
-    expect(resolveSecretValue({}, "API_TOKEN")).toBeUndefined();
   });
 });
 

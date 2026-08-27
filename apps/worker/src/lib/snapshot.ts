@@ -1,7 +1,7 @@
 import { drizzle } from "drizzle-orm/d1";
-import { and, desc, eq, gte, inArray } from "drizzle-orm";
-import type { BannerStatus, ComponentStatus, FailWhen } from "@foxwatch/config";
-import { bannerStatus, componentStatus, publicSnapshot, sanitizeText, parseHomepageUrl, type PublicSnapshot } from "@foxwatch/engine";
+import { desc, eq, gte, inArray, isNull, or } from "drizzle-orm";
+import type { BannerStatus, Check, ComponentStatus } from "@foxwatch/config";
+import { bannerStatus, publicSnapshot, sanitizeText, parseHomepageUrl, type PublicSnapshot } from "@foxwatch/engine";
 import type { Env } from "../env.ts";
 import * as schema from "../db/schema.ts";
 import { renderLivePayload } from "./public-html.ts";
@@ -10,6 +10,41 @@ import { sniffIconMime } from "./crypto.ts";
 
 function utcDate(ts: number): string {
   return new Date(ts).toISOString().slice(0, 10);
+}
+
+function incidentComponentIds(incident: { componentId: string | null; componentIdsJson: string | null }): string[] {
+  try {
+    const parsed = JSON.parse(incident.componentIdsJson ?? "null") as unknown;
+    if (Array.isArray(parsed)) return parsed.filter((id): id is string => typeof id === "string");
+  } catch {
+    /* legacy incident; fall through to the original single component */
+  }
+  return incident.componentId ? [incident.componentId] : [];
+}
+
+function overlapDuration(
+  intervals: Array<{ start: number; end: number }>,
+  rangeStart: number,
+  rangeEnd: number,
+): number {
+  const clipped = intervals
+    .map(({ start, end }) => ({ start: Math.max(start, rangeStart), end: Math.min(end, rangeEnd) }))
+    .filter(({ start, end }) => end > start)
+    .sort((a, b) => a.start - b.start);
+  let total = 0;
+  let currentStart = 0;
+  let currentEnd = 0;
+  for (const interval of clipped) {
+    if (currentEnd === 0 || interval.start > currentEnd) {
+      if (currentEnd > currentStart) total += currentEnd - currentStart;
+      currentStart = interval.start;
+      currentEnd = interval.end;
+    } else {
+      currentEnd = Math.max(currentEnd, interval.end);
+    }
+  }
+  if (currentEnd > currentStart) total += currentEnd - currentStart;
+  return total;
 }
 
 function daysBack(n: number): string[] {
@@ -153,30 +188,83 @@ export async function deleteIcon(env: Env): Promise<InstanceSettings> {
 export async function isStale(env: Env, now = Date.now()): Promise<{ stale: boolean; lastTick: number | null }> {
   try {
     const db = drizzle(env.DB, { schema });
-    const rows = await db.select().from(schema.meta).where(eq(schema.meta.key, "last_tick"));
-    const lastTick = rows[0] ? Number(rows[0].value) : null;
-    return { lastTick, stale: lastTick == null || now - lastTick > 3 * 60_000 };
+    const monitors = await db.select().from(schema.monitors);
+    const latest = await db.select().from(schema.checkLatest);
+    const windows = await db.select().from(schema.maintenance);
+    const active = monitors.filter((m) => {
+      if (m.mutedUntil && m.mutedUntil > now) return false;
+      return !windows.some((w) => w.componentId === m.componentId && w.startAt <= now && now < w.endAt);
+    });
+    if (active.length === 0) return { lastTick: null, stale: false };
+    const lastTick = latest.reduce<number | null>((max, row) => max == null || row.checkedAt > max ? row.checkedAt : max, null);
+    const stale = active.some((monitor) => {
+      const check = JSON.parse(monitor.configJson) as Check;
+      const expected = check.type === "heartbeat" ? ["global"] : check.regions;
+      const freshAfter = now - monitorFreshnessMs(check);
+      const seen = new Set(
+        latest
+          .filter((row) => row.monitorId === monitor.id && row.checkedAt >= freshAfter)
+          .map((row) => row.region),
+      );
+      return expected.some((region) => !seen.has(region));
+    });
+    return { lastTick, stale };
   } catch {
     return { lastTick: null, stale: true };
   }
 }
 
+export function monitorFreshnessMs(check: Check): number {
+  const attemptBudget = check.type === "http" ? check.timeoutMs * (Math.max(0, check.retries) + 1) : check.graceMs;
+  return Math.max(check.intervalMs * 2.5, check.intervalMs + attemptBudget + 30_000);
+}
+
+function monitorPublicStatus(
+  monitor: typeof schema.monitors.$inferSelect,
+  latest: Array<typeof schema.checkLatest.$inferSelect>,
+  now: number,
+): ComponentStatus {
+  if (monitor.mutedUntil && monitor.mutedUntil > now) return "unknown";
+  let check: Check;
+  try {
+    check = JSON.parse(monitor.configJson) as Check;
+  } catch {
+    return "unknown";
+  }
+  const expected = check.type === "heartbeat" ? ["global"] : check.regions;
+  const freshAfter = now - monitorFreshnessMs(check);
+  const seen = new Set(
+    latest.filter((row) => row.monitorId === monitor.id && row.checkedAt >= freshAfter).map((row) => row.region),
+  );
+  if (expected.length === 0 || expected.some((region) => !seen.has(region))) return "unknown";
+  if (monitor.confirmedOutcome === "fail") return "failing";
+  if (monitor.confirmedOutcome === "degraded") return "degraded";
+  if (monitor.confirmedOutcome === "pass") return "operational";
+  return "unknown";
+}
+
+function combinedMonitorStatus(statuses: ComponentStatus[]): ComponentStatus {
+  if (statuses.some((status) => status === "failing")) return "failing";
+  if (statuses.some((status) => status === "degraded")) return "degraded";
+  if (statuses.length === 0 || statuses.some((status) => status === "unknown")) return "unknown";
+  return "operational";
+}
+
 export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
   const db = drizzle(env.DB, { schema });
   const settings = await loadSettings(env);
-  const failWhen: FailWhen = "majority";
   const siteName = settings.siteName;
   const { stale, lastTick } = await isStale(env);
   const monitors = await db.select().from(schema.monitors);
-  const states = await db.select().from(schema.componentState);
-  const stateBy = new Map(states.map((s) => [s.componentId, s.status as ComponentStatus]));
   const now = Date.now();
-  let windows: Array<{ componentId: string; startAt: number; endAt: number }> = [];
+  let windows: Array<{ id: string; componentId: string; startAt: number; endAt: number; note: string }> = [];
   try {
     windows = await db.select({
+      id: schema.maintenance.id,
       componentId: schema.maintenance.componentId,
       startAt: schema.maintenance.startAt,
       endAt: schema.maintenance.endAt,
+      note: schema.maintenance.note,
     }).from(schema.maintenance);
   } catch {
     windows = [];
@@ -185,20 +273,28 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
   const latest = await db.select().from(schema.checkLatest);
   const dates = daysBack(90);
   const uptime = await db.select().from(schema.dailyUptime).where(gte(schema.dailyUptime.date, dates[0]!));
-  const incidentsOpen = await db
+  const historyStart = Date.parse(`${dates[0]}T00:00:00.000Z`);
+  const incidentsAll = await db
     .select()
     .from(schema.incidents)
+    .where(or(gte(schema.incidents.createdAt, historyStart), gte(schema.incidents.resolvedAt, historyStart), isNull(schema.incidents.resolvedAt)))
     .orderBy(desc(schema.incidents.createdAt))
-    .limit(50);
-  const incidentIds = incidentsOpen.map((i) => i.id);
+    .limit(1000);
+  const incidentsForDisplay = incidentsAll.slice(0, 50);
+  const incidentIds = incidentsForDisplay.map((i) => i.id);
   const updates =
     incidentIds.length === 0
       ? []
       : await db.select().from(schema.incidentUpdates).where(inArray(schema.incidentUpdates.incidentId, incidentIds));
 
-  const incidentDays = new Set(
-    incidentsOpen.map((i) => utcDate(i.createdAt)),
-  );
+  const allComponentIds = new Set(monitors.map((monitor) => monitor.componentId));
+  const incidentScopes = incidentsAll.map((incident) => {
+    const explicit = incidentComponentIds(incident);
+    return {
+      incident,
+      componentIds: explicit.length ? explicit : [...allComponentIds],
+    };
+  });
 
   const groupsMap = new Map<
     string,
@@ -218,20 +314,52 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
   const componentsForBanner: Array<{ status: ComponentStatus; critical: boolean }> = [];
   const groups = [...groupsMap.values()].map((g) => {
     const components = [...g.components.entries()].map(([cid, mons]) => {
-      const runs = latest
-        .filter((r) => mons.some((m) => m.id === r.monitorId))
-        .map((r) => ({ region: r.region, outcome: r.outcome as "pass" | "degraded" | "fail" }));
-      const critical = mons.some((m) => m.critical === 1);
+      const activeMons = mons.filter((monitor) => !monitor.mutedUntil || monitor.mutedUntil <= now);
+      const critical = activeMons.some((m) => m.critical === 1);
       const inMaintenance = activeMaintenance.has(cid);
-      const computed = componentStatus(runs, failWhen, inMaintenance);
-      const stored = stateBy.get(cid);
-      const status = inMaintenance ? computed : (stored ?? computed);
-      componentsForBanner.push({ status, critical });
+      const openIncidents = incidentScopes
+        .filter(({ incident, componentIds }) => !incident.resolvedAt && componentIds.includes(cid))
+        .map(({ incident }) => incident);
+      const incidentImpact = openIncidents.some((incident) => incident.impact === "failing")
+        ? "failing"
+        : openIncidents.some((incident) => incident.impact === "degraded")
+          ? "degraded"
+          : null;
+      const monitorStatus = combinedMonitorStatus(activeMons.map((monitor) => monitorPublicStatus(monitor, latest, now)));
+      const status: ComponentStatus = incidentImpact === "failing"
+        ? "failing"
+        : incidentImpact === "degraded"
+          ? "degraded"
+          : inMaintenance
+            ? "maintenance"
+            : monitorStatus;
+      componentsForBanner.push({
+        status,
+        critical: critical || openIncidents.some((incident) => incident.auto === 0 && incident.impact === "failing"),
+      });
       const rows = uptime.filter((u) => u.componentId === cid);
       const byDate = new Map(rows.map((u) => [u.date, u]));
       const days = dates.map((date) => {
         const u = byDate.get(date);
-        const uptimePct = u && u.total > 0 ? u.ok / u.total : null;
+        const dayStart = Date.parse(`${date}T00:00:00.000Z`);
+        const dayEnd = Math.min(dayStart + 86_400_000, now);
+        const affectingIncidents = incidentScopes
+          .filter(({ componentIds }) => componentIds.includes(cid))
+          .map(({ incident }) => incident);
+        const outages = affectingIncidents
+          .filter((incident) => incident.impact === "failing")
+          .map((incident) => ({ start: incident.createdAt, end: incident.resolvedAt ?? now }));
+        const downtimeMs = overlapDuration(outages, dayStart, dayEnd);
+        const overlapsDay = (incident: typeof incidentsAll[number]) =>
+          incident.createdAt < dayEnd && (incident.resolvedAt ?? now) > dayStart;
+        const incidentImpact: "failing" | "degraded" | null = affectingIncidents.some((incident) => overlapsDay(incident) && incident.impact === "failing")
+          ? "failing"
+          : affectingIncidents.some((incident) => overlapsDay(incident) && incident.impact === "degraded")
+            ? "degraded"
+            : null;
+        const hasData = Boolean(u && u.total > 0) || incidentImpact != null;
+        const observedMs = Math.max(0, dayEnd - dayStart);
+        const uptimePct = hasData && observedMs > 0 ? Math.max(0, 1 - downtimeMs / observedMs) : null;
         const latencyCount = u?.latencyCount ?? 0;
         const latencySum = u?.latencySum ?? 0;
         const latencyMs = latencyCount > 0 ? Math.round(latencySum / latencyCount) : null;
@@ -239,38 +367,113 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
         return {
           date,
           uptime: uptimePct,
-          incident: incidentDays.has(date),
+          incident: incidentImpact != null,
+          incidentImpact,
           checks,
           latencyMs,
           latencyMinMs: u?.latencyMin ?? null,
           latencyMaxMs: u?.latencyMax ?? null,
         };
       });
-      const tot = rows.reduce((a, u) => a + u.total, 0);
-      const ok = rows.reduce((a, u) => a + u.ok, 0);
+      let observed = 0;
+      let available = 0;
+      for (const day of days) {
+        if (day.uptime == null) continue;
+        const start = Date.parse(`${day.date}T00:00:00.000Z`);
+        const duration = Math.max(0, Math.min(start + 86_400_000, now) - start);
+        observed += duration;
+        available += duration * day.uptime;
+      }
       return {
         id: cid,
         name: mons[0]!.componentName,
         groupId: g.id,
         groupName: g.name,
         status,
-        uptime90: tot ? ok / tot : null,
+        uptime90: observed ? available / observed : null,
         days,
       };
     });
-    const tot = components.reduce((a, c) => a + (c.uptime90 == null ? 0 : 1), 0);
-    const sum = components.reduce((a, c) => a + (c.uptime90 ?? 0), 0);
+    const groupComponentIds = new Set(components.map((component) => component.id));
+    const groupIncidents = incidentScopes
+      .filter(({ componentIds }) => componentIds.some((componentId) => groupComponentIds.has(componentId)))
+      .map(({ incident }) => incident);
+    const groupDays = dates.map((date, index) => {
+      const slices = components.map((component) => component.days[index]).filter((day): day is NonNullable<typeof day> => Boolean(day));
+      const dayStart = Date.parse(`${date}T00:00:00.000Z`);
+      const dayEnd = Math.min(dayStart + 86_400_000, now);
+      const overlapsDay = (incident: typeof incidentsAll[number]) =>
+        incident.createdAt < dayEnd && (incident.resolvedAt ?? now) > dayStart;
+      const incidentImpact: "failing" | "degraded" | null = groupIncidents.some(
+        (incident) => overlapsDay(incident) && incident.impact === "failing",
+      )
+        ? "failing"
+        : groupIncidents.some((incident) => overlapsDay(incident) && incident.impact === "degraded")
+          ? "degraded"
+          : null;
+      const outages = groupIncidents
+        .filter((incident) => incident.impact === "failing")
+        .map((incident) => ({ start: incident.createdAt, end: incident.resolvedAt ?? now }));
+      const observedMs = Math.max(0, dayEnd - dayStart);
+      const hasData = slices.some((day) => day.uptime != null) || incidentImpact != null;
+      const uptimePct = hasData && observedMs > 0
+        ? Math.max(0, 1 - overlapDuration(outages, dayStart, dayEnd) / observedMs)
+        : null;
+      const withLatency = slices.filter((day) => day.latencyMs != null && day.latencyMs > 0);
+      const weight = (day: typeof slices[number]) => day.checks && day.checks > 0 ? day.checks : 1;
+      const weightSum = withLatency.reduce((total, day) => total + weight(day), 0);
+      const checks = slices.reduce((total, day) => total + (day.checks ?? 0), 0);
+      const latencyMins = slices.map((day) => day.latencyMinMs).filter((value): value is number => value != null);
+      const latencyMaxes = slices.map((day) => day.latencyMaxMs).filter((value): value is number => value != null);
+      return {
+        date,
+        uptime: uptimePct,
+        incident: incidentImpact != null,
+        incidentImpact,
+        checks: checks || null,
+        latencyMs: withLatency.length
+          ? Math.round(withLatency.reduce((total, day) => total + (day.latencyMs ?? 0) * weight(day), 0) / weightSum)
+          : null,
+        latencyMinMs: latencyMins.length ? Math.min(...latencyMins) : null,
+        latencyMaxMs: latencyMaxes.length ? Math.max(...latencyMaxes) : null,
+      };
+    });
+    let groupObserved = 0;
+    let groupAvailable = 0;
+    for (const day of groupDays) {
+      if (day.uptime == null) continue;
+      const start = Date.parse(`${day.date}T00:00:00.000Z`);
+      const duration = Math.max(0, Math.min(start + 86_400_000, now) - start);
+      groupObserved += duration;
+      groupAvailable += duration * day.uptime;
+    }
     return {
       id: g.id,
       name: g.name,
-      uptime90: tot ? sum / tot : null,
+      uptime90: groupObserved ? groupAvailable / groupObserved : null,
+      days: groupDays,
       components,
     };
   });
 
-  const banner: BannerStatus = bannerStatus(componentsForBanner);
-  const incidents = incidentsOpen.map((i) => ({
+  const globalOpenImpact = incidentsAll
+    .filter((incident) => !incident.resolvedAt && incidentComponentIds(incident).length === 0)
+    .some((incident) => incident.impact === "failing")
+    ? "failing"
+    : incidentsAll.some((incident) => !incident.resolvedAt && incidentComponentIds(incident).length === 0 && incident.impact === "degraded")
+      ? "degraded"
+      : null;
+  const banner: BannerStatus = globalOpenImpact === "failing"
+    ? "failing"
+    : globalOpenImpact === "degraded"
+      ? "degraded"
+      : bannerStatus(componentsForBanner);
+  const componentNames = new Map(monitors.map((monitor) => [monitor.componentId, monitor.componentName]));
+  const incidents = incidentsForDisplay.map((i) => ({
     id: i.id,
+    componentIds: incidentScopes.find(({ incident }) => incident.id === i.id)?.componentIds ?? [],
+    componentNames: (incidentScopes.find(({ incident }) => incident.id === i.id)?.componentIds ?? [])
+      .map((componentId) => componentNames.get(componentId) ?? componentId),
     title: sanitizeText(i.title, 200),
     status: i.status,
     impact: i.impact,
@@ -281,6 +484,14 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((u) => ({ status: u.status, body: sanitizeText(u.body, 2000), at: u.createdAt })),
   }));
+  const publicMaintenance = windows
+    .filter((window) => window.endAt > now)
+    .sort((a, b) => a.startAt - b.startAt)
+    .map((window) => ({
+      ...window,
+      componentName: componentNames.get(window.componentId) ?? window.componentId,
+      note: sanitizeText(window.note, 500),
+    }));
 
   return publicSnapshot({
     siteName,
@@ -291,6 +502,7 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
     lastTick,
     generatedAt: now,
     groups,
+    maintenance: publicMaintenance,
     incidents,
   });
 }
@@ -308,7 +520,14 @@ export async function publishSnapshot(env: Env): Promise<PublicSnapshot> {
 
 export async function readSnapshot(env: Env): Promise<PublicSnapshot> {
   const cached = await env.STATUS.get("snapshot:public");
-  if (cached) return JSON.parse(cached) as PublicSnapshot;
+  if (cached) {
+    const parsed = JSON.parse(cached) as PublicSnapshot;
+    return publicSnapshot({
+      ...parsed,
+      maintenance: parsed.maintenance ?? [],
+      incidents: parsed.incidents.map((incident) => ({ ...incident, componentIds: incident.componentIds ?? [] })),
+    });
+  }
   return publishSnapshot(env);
 }
 
@@ -329,41 +548,26 @@ export async function bumpUptime(
   const addCount = samples.length;
   const addMin = addCount ? Math.min(...samples) : null;
   const addMax = addCount ? Math.max(...samples) : null;
-  const db = drizzle(env.DB, { schema });
-  const existing = (
-    await db
-      .select()
-      .from(schema.dailyUptime)
-      .where(and(eq(schema.dailyUptime.componentId, componentId), eq(schema.dailyUptime.date, date)))
-  )[0];
-  if (!existing) {
-    await db.insert(schema.dailyUptime).values({
-      componentId,
-      date,
-      ok: ok ? 1 : 0,
-      total: 1,
-      latencySum: addSum,
-      latencyCount: addCount,
-      latencyMin: addMin,
-      latencyMax: addMax,
-    });
-    return;
-  }
-  const nextMin =
-    addMin == null ? existing.latencyMin : existing.latencyMin == null ? addMin : Math.min(existing.latencyMin, addMin);
-  const nextMax =
-    addMax == null ? existing.latencyMax : existing.latencyMax == null ? addMax : Math.max(existing.latencyMax, addMax);
-  await db
-    .update(schema.dailyUptime)
-    .set({
-      ok: existing.ok + (ok ? 1 : 0),
-      total: existing.total + 1,
-      latencySum: (existing.latencySum ?? 0) + addSum,
-      latencyCount: (existing.latencyCount ?? 0) + addCount,
-      latencyMin: nextMin,
-      latencyMax: nextMax,
-    })
-    .where(and(eq(schema.dailyUptime.componentId, componentId), eq(schema.dailyUptime.date, date)));
+  await env.DB.prepare(`INSERT INTO daily_uptime
+    (component_id, date, ok, total, latency_sum, latency_count, latency_min, latency_max)
+    VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+    ON CONFLICT(component_id, date) DO UPDATE SET
+      ok = ok + excluded.ok,
+      total = total + 1,
+      latency_sum = latency_sum + excluded.latency_sum,
+      latency_count = latency_count + excluded.latency_count,
+      latency_min = CASE
+        WHEN excluded.latency_min IS NULL THEN latency_min
+        WHEN latency_min IS NULL THEN excluded.latency_min
+        ELSE MIN(latency_min, excluded.latency_min)
+      END,
+      latency_max = CASE
+        WHEN excluded.latency_max IS NULL THEN latency_max
+        WHEN latency_max IS NULL THEN excluded.latency_max
+        ELSE MAX(latency_max, excluded.latency_max)
+      END`)
+    .bind(componentId, date, ok ? 1 : 0, addSum, addCount, addMin, addMax)
+    .run();
 }
 
 export async function writeLastTick(env: Env, now = Date.now()): Promise<void> {

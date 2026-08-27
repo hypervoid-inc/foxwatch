@@ -9,6 +9,10 @@ export type Env = {
   STATUS_HUB: DurableObjectNamespace;
   ASSETS: Fetcher;
   ALLOW_HTTP_LOCAL?: string;
+  /** One-time bootstrap credentials used only to create or rotate Worker secrets from admin. */
+  FOXWATCH_CF_API_TOKEN?: string;
+  FOXWATCH_CF_ACCOUNT_ID?: string;
+  FOXWATCH_CF_SCRIPT_NAME?: string;
 };
 
 export function envSecret(env: Env, name: string): string | undefined {

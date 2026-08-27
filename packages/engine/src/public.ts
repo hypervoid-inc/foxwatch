@@ -4,6 +4,7 @@ export type PublicDay = {
   date: string;
   uptime: number | null;
   incident: boolean;
+  incidentImpact?: "degraded" | "failing" | null;
   /** Monitor runs recorded that UTC day; null when the day has no samples. */
   checks: number | null;
   /** Daily average probe latency in ms; null when no latency samples exist. */
@@ -24,12 +25,23 @@ export type PublicComponent = {
 
 export type PublicIncident = {
   id: string;
+  componentIds: string[];
+  componentNames?: string[];
   title: string;
   status: string;
   impact: string;
   startedAt: number;
   resolvedAt: number | null;
   updates: Array<{ status: string; body: string; at: number }>;
+};
+
+export type PublicMaintenance = {
+  id: string;
+  componentId: string;
+  componentName: string;
+  startAt: number;
+  endAt: number;
+  note: string;
 };
 
 export type PublicSnapshot = {
@@ -46,8 +58,11 @@ export type PublicSnapshot = {
     id: string;
     name: string;
     uptime90: number | null;
+    /** Group-level history. Uses the union of child outages, so disjoint failures are not understated. */
+    days?: PublicDay[];
     components: PublicComponent[];
   }>;
+  maintenance: PublicMaintenance[];
   incidents: PublicIncident[];
 };
 
@@ -64,6 +79,7 @@ export function publicSnapshot(input: PublicSnapshot): PublicSnapshot {
       id: g.id,
       name: g.name,
       uptime90: g.uptime90,
+      days: g.days?.map((day) => ({ ...day })),
       components: g.components.map((c) => ({
         id: c.id,
         name: c.name,
@@ -74,8 +90,11 @@ export function publicSnapshot(input: PublicSnapshot): PublicSnapshot {
         days: c.days,
       })),
     })),
+    maintenance: (input.maintenance ?? []).map((window) => ({ ...window })),
     incidents: input.incidents.map((i) => ({
       id: i.id,
+      componentIds: [...(i.componentIds ?? [])],
+      componentNames: [...(i.componentNames ?? [])],
       title: i.title,
       status: i.status,
       impact: i.impact,

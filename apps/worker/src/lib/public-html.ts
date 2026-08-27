@@ -6,12 +6,14 @@ type PublicDay = PublicComponent["days"][number];
 type PublicIncident = PublicSnapshot["incidents"][number];
 
 const LABELS: Record<PublicSnapshot["banner"], string> = {
+  unknown: "Monitoring is initializing.",
   fully_operational: "We're fully operational.",
   degraded: "We're experiencing degraded performance.",
   failing: "We're experiencing an outage.",
 };
 
 const BODY: Record<PublicSnapshot["banner"], string> = {
+  unknown: "We do not have enough fresh monitoring data to report current availability yet.",
   fully_operational: "We're not aware of any issues affecting our systems.",
   degraded: "Some systems are impacted. We're investigating and will post updates here.",
   failing: "Some systems are currently unavailable. We're working to restore service.",
@@ -66,15 +68,16 @@ function dateRange(days: PublicDay[]): string | null {
   return a === b ? a : `${a} – ${b}`;
 }
 
-function dayKind(uptime: number | null, incident: boolean): "ok" | "warn" | "bad" | "empty" {
-  if (incident || (uptime != null && uptime < 0.95)) return "bad";
+function dayKind(uptime: number | null, incident: boolean, incidentImpact?: "degraded" | "failing" | null): "ok" | "warn" | "bad" | "empty" {
+  if (incidentImpact === "failing" || (incident && !incidentImpact) || (uptime != null && uptime < 0.95)) return "bad";
+  if (incidentImpact === "degraded") return "warn";
   if (uptime == null) return "empty";
   if (uptime >= 0.999) return "ok";
   return "warn";
 }
 
-function dayCaption(uptime: number | null, incident: boolean): string {
-  const kind = dayKind(uptime, incident);
+function dayCaption(uptime: number | null, incident: boolean, incidentImpact?: "degraded" | "failing" | null): string {
+  const kind = dayKind(uptime, incident, incidentImpact);
   if (kind === "ok") return "No incidents";
   if (kind === "warn") return "Degraded performance";
   if (kind === "bad") return "Outage";
@@ -85,6 +88,7 @@ function groupStatus(components: PublicComponent[]): ComponentStatus {
   if (components.some((c) => c.status === "failing")) return "failing";
   if (components.some((c) => c.status === "degraded")) return "degraded";
   if (components.some((c) => c.status === "maintenance")) return "maintenance";
+  if (components.length === 0 || components.some((c) => c.status === "unknown")) return "unknown";
   return "operational";
 }
 
@@ -103,6 +107,7 @@ function mergeDays(components: PublicComponent[]): PublicDay[] {
       date: d.date,
       uptime: uptimes.length ? Math.min(...uptimes) : null,
       incident: slices.some((s) => s.incident),
+      incidentImpact: slices.some((s) => s.incidentImpact === "failing") ? "failing" : slices.some((s) => s.incidentImpact === "degraded") ? "degraded" : null,
       checks: checks || null,
       latencyMs: withLat.length
         ? Math.round(withLat.reduce((a, s) => a + (s.latencyMs ?? 0) * weight(s), 0) / weightSum)
@@ -173,7 +178,7 @@ function mark(status: ComponentStatus | "ok" | "warn" | "bad" | "empty"): string
       ? "ok"
       : status === "failing" || status === "bad"
         ? "bad"
-        : status === "empty"
+        : status === "empty" || status === "unknown"
           ? "empty"
           : "warn";
   if (kind === "ok") {
@@ -265,11 +270,11 @@ function renderBar(days: PublicDay[], label: string, extraClass = ""): string {
   const maxLatency = days.reduce((m, d) => Math.max(m, d.latencyMs ?? 0), 0);
   const cells = days
     .map((d) => {
-      const kind = dayKind(d.uptime, d.incident);
-      const caption = dayCaption(d.uptime, d.incident);
+      const kind = dayKind(d.uptime, d.incident, d.incidentImpact);
+      const caption = dayCaption(d.uptime, d.incident, d.incidentImpact);
       const hasData = d.uptime != null || d.incident;
       const h = tickHeightPct(d.latencyMs, maxLatency, hasData);
-      return `<span class="day ${kind}" tabindex="0" style="--h:${h}%"><span class="tick"></span><span class="tip"><span class="tip-date">${escapeHtml(formatLongDate(d.date))}</span><span class="tip-row">${mark(kind)}<span>${escapeHtml(caption)}</span></span>${renderTipStats(d)}</span></span>`;
+      return `<span class="day ${kind}" style="--h:${h}%"><span class="tick"></span><span class="tip" aria-hidden="true"><span class="tip-date">${escapeHtml(formatLongDate(d.date))}</span><span class="tip-row">${mark(kind)}<span>${escapeHtml(caption)}</span></span>${renderTipStats(d)}</span></span>`;
     })
     .join("");
   return `<div class="bar${extraClass ? ` ${extraClass}` : ""}" role="img" aria-label="${escapeHtml(label)}">${cells}</div>`;
@@ -282,7 +287,7 @@ function maintLabel(status: ComponentStatus): string {
 function renderService(group: PublicSnapshot["groups"][number]): string {
   const expandable = group.components.length > 1;
   const status = groupStatus(group.components);
-  const days = mergeDays(group.components);
+  const days = group.days ?? mergeDays(group.components);
   const count = `${group.components.length} component${group.components.length === 1 ? "" : "s"}`;
   const nested = expandable
     ? `<div class="nested"><div class="nested-inner">${group.components
@@ -348,7 +353,7 @@ function renderIncidents(incidents: PublicIncident[]): string {
         .map(
           (i) => `<article class="incident" id="incident-${escapeHtml(i.id)}">
             <h3>${escapeHtml(i.title)}</h3>
-            <p class="meta">${escapeHtml(incidentStatusLabel(i.status))} · ${escapeHtml(impactLabel(i.impact))}</p>
+            <p class="meta">${escapeHtml(incidentStatusLabel(i.status))} · ${escapeHtml(impactLabel(i.impact))}${i.componentNames?.length ? ` · ${escapeHtml(i.componentNames.join(", "))}` : ""}</p>
             ${renderTimeline(i)}
           </article>`,
         )
@@ -362,7 +367,7 @@ const STYLES = `
 @property --bg { syntax: "<color>"; inherits: true; initial-value: #efece6; }
 @property --card { syntax: "<color>"; inherits: true; initial-value: #f7f4ee; }
 @property --ink { syntax: "<color>"; inherits: true; initial-value: #3a3732; }
-@property --muted { syntax: "<color>"; inherits: true; initial-value: #7a756c; }
+@property --muted { syntax: "<color>"; inherits: true; initial-value: #6d6860; }
 @property --line { syntax: "<color>"; inherits: true; initial-value: #ddd8ce; }
 @property --hover { syntax: "<color>"; inherits: true; initial-value: #e8e4dc; }
 @property --ok { syntax: "<color>"; inherits: true; initial-value: #2f8f73; }
@@ -383,7 +388,7 @@ const STYLES = `
   color-scheme: light;
   --bg: #efece6;
   --ink: #3a3732;
-  --muted: #7a756c;
+  --muted: #6d6860;
   --line: #ddd8ce;
   --card: #f7f4ee;
   --hover: #e8e4dc;
@@ -522,9 +527,11 @@ main { flex: 1 0 auto; }
   border-radius: 6px; cursor: pointer;
   transition: transform var(--duration-press) var(--ease-out);
 }
-.theme-toggle:hover {
-  background: var(--hover);
-  transition: background-color var(--duration-ui) var(--ease-out), transform var(--duration-press) var(--ease-out);
+@media (hover: hover) and (pointer: fine) {
+  .theme-toggle:hover {
+    background: var(--hover);
+    transition: background-color var(--duration-ui) var(--ease-out), transform var(--duration-press) var(--ease-out);
+  }
 }
 .theme-toggle:active { transform: scale(0.97); }
 .theme-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
@@ -556,6 +563,8 @@ html[data-theme="dark"] .theme-icon-sun { opacity: 1; transform: rotate(0deg); }
 .banner-degraded .banner-head { background: var(--warn-bg); color: var(--warn-ink); }
 .banner-failing { border-color: var(--bad-line); }
 .banner-failing .banner-head { background: var(--bad-bg); color: var(--bad-ink); }
+.banner-unknown { border-color: var(--line); }
+.banner-unknown .banner-head { background: var(--hover); color: var(--ink); }
 .stale {
   margin: 0.65rem 0 0; padding: 0.55rem 0.85rem;
   border: 1px solid var(--warn-line); border-radius: 8px;
@@ -598,8 +607,6 @@ details[open] .chev { transform: rotate(180deg); }
 .day.ok .tick { background: var(--ok); }
 .day.warn .tick { background: var(--warn); }
 .day.bad .tick { background: var(--bad); }
-.day:hover, .day:focus-within { z-index: 3; }
-.day:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 .tip {
   position: absolute; bottom: calc(100% + 8px); left: 50%;
   opacity: 0; visibility: hidden; pointer-events: none;
@@ -609,12 +616,14 @@ details[open] .chev { transform: rotate(180deg); }
   box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 12%, transparent); white-space: nowrap; min-width: 13.5rem;
   transition: opacity var(--duration-ui) var(--ease-out), transform var(--duration-ui) var(--ease-out), visibility var(--duration-ui) var(--ease-out);
 }
-.bar:hover .tip, .bar:focus-within .tip { transition-duration: 0ms; }
+.bar:hover .tip { transition-duration: 0ms; }
 .bar .day:nth-child(-n+24) .tip { left: 0; transform: translateY(4px); }
 .bar .day:nth-last-child(-n+24) .tip { left: auto; right: 0; transform: translateY(4px); }
-.day:hover .tip, .day:focus-within .tip { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
-.bar .day:nth-child(-n+24):hover .tip, .bar .day:nth-child(-n+24):focus-within .tip { transform: translateY(0); }
-.bar .day:nth-last-child(-n+24):hover .tip, .bar .day:nth-last-child(-n+24):focus-within .tip { transform: translateY(0); }
+@media (hover: hover) and (pointer: fine) {
+  .day:hover { z-index: 3; }
+  .day:hover .tip { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+  .bar .day:nth-child(-n+24):hover .tip, .bar .day:nth-last-child(-n+24):hover .tip { transform: translateY(0); }
+}
 .tip-date { display: block; font-size: 0.75rem; margin-bottom: 0.25rem; }
 .tip-row { display: flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: var(--ink); }
 .tip-row .mark { width: 0.85rem; height: 0.85rem; }
@@ -646,14 +655,11 @@ details[open] .chev { transform: rotate(180deg); }
   position: absolute; bottom: 0; font-size: 0.6875rem; font-weight: 500;
   color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.nested { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--duration-ui) var(--ease-out); }
-.nested-inner { overflow: hidden; min-height: 0; }
-details[open] .nested { grid-template-rows: 1fr; }
-details[open] .nested-inner { overflow: visible; }
+.nested-inner { min-height: 0; }
 details[open] ~ .group-bar { display: none; }
 .component { padding: 0.85rem 0 0.15rem; margin-left: 0.15rem; }
 .component + .component { border-top: 1px solid var(--line); margin-top: 0.7rem; padding-top: 0.85rem; }
-#history { margin-bottom: 2rem; }
+#live-history { margin-bottom: 2rem; }
 .incident-day { border-top: 1px solid var(--line); }
 .incident-date { margin: 0; padding: 0.85rem 1.15rem 0.25rem; color: var(--muted); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; }
 .incident { padding: 0.55rem 1.15rem 1rem; }
@@ -685,7 +691,6 @@ details[open] ~ .group-bar { display: none; }
   .chev, .tip, .theme-toggle { transition-property: opacity, visibility, color, background-color, border-color; }
   .theme-icon { transition: opacity var(--duration-ui) var(--ease-out); }
   html[data-theme="dark"] .theme-icon-moon, html[data-theme="dark"] .theme-icon-sun { transform: none; }
-  .nested { transition: none; }
 }
 `;
 
@@ -702,7 +707,7 @@ function renderNotices(snap: PublicSnapshot): string {
 export function renderBannerBlock(snap: PublicSnapshot): string {
   return `<div id="live-banner"><section class="banner banner-${escapeHtml(snap.banner)}" aria-live="polite">
         <div class="banner-head">
-          ${mark(snap.banner === "fully_operational" ? "operational" : snap.banner === "failing" ? "failing" : "degraded")}
+          ${mark(snap.banner === "unknown" ? "empty" : snap.banner === "fully_operational" ? "operational" : snap.banner === "failing" ? "failing" : "degraded")}
           <h1>${escapeHtml(LABELS[snap.banner])}</h1>
         </div>
         <p class="banner-body">${escapeHtml(BODY[snap.banner])}</p>
@@ -729,6 +734,16 @@ export function renderHistoryBlock(snap: PublicSnapshot): string {
       </section>`;
 }
 
+export function renderMaintenanceBlock(snap: PublicSnapshot): string {
+  const maintenance = snap.maintenance ?? [];
+  if (!maintenance.length) return `<section id="live-maintenance" hidden></section>`;
+  const items = maintenance.map((window) => {
+    const active = window.startAt <= snap.generatedAt && snap.generatedAt < window.endAt;
+    return `<li class="incident"><h3>${escapeHtml(window.componentName)}</h3><p class="meta">${active ? "In progress" : "Scheduled"} · <time datetime="${new Date(window.startAt).toISOString()}">${escapeHtml(new Date(window.startAt).toUTCString())}</time> – <time datetime="${new Date(window.endAt).toISOString()}">${escapeHtml(new Date(window.endAt).toUTCString())}</time></p>${window.note ? `<p class="update-body">${escapeHtml(window.note)}</p>` : ""}</li>`;
+  }).join("");
+  return `<section class="card systems" id="live-maintenance" aria-labelledby="maintenance-title"><div class="card-head"><h2 id="maintenance-title">Scheduled maintenance</h2></div><ul class="timeline">${items}</ul></section>`;
+}
+
 export function snapshotEtag(snap: PublicSnapshot): string {
   const s = JSON.stringify({
     banner: snap.banner,
@@ -739,6 +754,7 @@ export function snapshotEtag(snap: PublicSnapshot): string {
     lastTick: snap.lastTick,
     groups: snap.groups,
     incidents: snap.incidents,
+    maintenance: snap.maintenance ?? [],
   });
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) {
@@ -758,6 +774,7 @@ export type LivePayload = {
   banner: string;
   systems: string;
   history: string;
+  maintenance: string;
 };
 
 export function renderLivePayload(snap: PublicSnapshot): LivePayload {
@@ -771,12 +788,13 @@ export function renderLivePayload(snap: PublicSnapshot): LivePayload {
     banner: renderBannerBlock(snap),
     systems: renderSystemsBlock(snap),
     history: renderHistoryBlock(snap),
+    maintenance: renderMaintenanceBlock(snap),
   };
 }
 
 /** Tiny WS client: one connection, no polling. Hibernating DO replies to "ping". */
 export const LIVE_CLIENT_SCRIPT = `(function(){
-  var etag="", delay=1000, ws, timer, iconSrc, faviconGen=0;
+  var etag="", delay=1000, ws, timer, poller, iconSrc, faviconGen=0;
   function fileDrag(e){ return e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.indexOf("Files")>=0; }
   window.addEventListener("dragover", function(e){ if (fileDrag(e)) e.preventDefault(); });
   window.addEventListener("drop", function(e){ if (fileDrag(e)) e.preventDefault(); });
@@ -807,7 +825,7 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
   });
   syncThemeBtn();
   function statusDot(b){
-    return b==="failing"?"${statusDotColor("failing")}":b==="degraded"?"${statusDotColor("degraded")}":"${statusDotColor("fully_operational")}";
+    return b==="failing"?"${statusDotColor("failing")}":b==="degraded"?"${statusDotColor("degraded")}":b==="fully_operational"?"${statusDotColor("fully_operational")}":"${statusDotColor("unknown")}";
   }
   function clipSquircle(ctx,ox,oy,size){
     var n=5, steps=64, rad=size/2, i, t, c, s, x, y;
@@ -859,7 +877,7 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
   }
   var iconLink=document.querySelector('link[rel="icon"]');
   iconSrc=iconLink && iconLink.getAttribute("href") || "/fox.png";
-  setStatusFavicon(iconSrc, document.documentElement.getAttribute("data-banner")||"fully_operational");
+  setStatusFavicon(iconSrc, document.documentElement.getAttribute("data-banner")||"unknown");
   function groups(){
     var out=[], nodes=document.querySelectorAll("#live-systems details[open]");
     for (var i=0;i<nodes.length;i++){
@@ -889,6 +907,7 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
     swap("live-banner", msg.banner);
     swap("live-systems", msg.systems);
     swap("live-history", msg.history);
+    swap("live-maintenance", msg.maintenance);
     swap("live-brand", msg.brand);
     restore(open);
     if (msg.title) document.title=msg.title;
@@ -897,7 +916,7 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
       document.documentElement.setAttribute("data-banner", msg.status);
       setStatusFavicon(iconSrc, msg.status);
     } else if (msg.icon){
-      setStatusFavicon(iconSrc, document.documentElement.getAttribute("data-banner")||"fully_operational");
+      setStatusFavicon(iconSrc, document.documentElement.getAttribute("data-banner")||"unknown");
     }
     if (msg.description){
       var meta=document.querySelector('meta[name="description"]');
@@ -911,9 +930,13 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
       if (ev.data==="pong") return;
       try { apply(JSON.parse(ev.data)); } catch (e) {}
     };
-    ws.onopen=function(){ delay=1000; };
+    ws.onopen=function(){ delay=1000; if(poller){clearInterval(poller);poller=null;} };
     ws.onclose=function(){
       if (timer){ clearInterval(timer); timer=null; }
+      if (!poller){
+        var poll=function(){fetch("/api/status/live.json",{headers:{accept:"application/json"}}).then(function(r){return r.ok?r.json():null;}).then(apply).catch(function(){});};
+        poll(); poller=setInterval(poll,60000);
+      }
       setTimeout(connect, delay);
       delay=Math.min(delay*2, 15000);
     };
@@ -948,6 +971,7 @@ export function renderPublicHtml(snap: PublicSnapshot): string {
     <main>
       ${renderBannerBlock(snap)}
       ${renderSystemsBlock(snap)}
+      ${renderMaintenanceBlock(snap)}
       ${renderHistoryBlock(snap)}
     </main>
     <footer class="foot">

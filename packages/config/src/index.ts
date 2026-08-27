@@ -27,8 +27,8 @@ export const ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export type CheckType = "http" | "heartbeat";
 export type Origin = "git" | "ui";
 export type RunOutcome = "pass" | "degraded" | "fail";
-export type ComponentStatus = "operational" | "degraded" | "failing" | "maintenance";
-export type BannerStatus = "fully_operational" | "degraded" | "failing";
+export type ComponentStatus = "unknown" | "operational" | "degraded" | "failing" | "maintenance";
+export type BannerStatus = "unknown" | "fully_operational" | "degraded" | "failing";
 export type FailWhen = "majority" | "any" | "all";
 export type IncidentStatus = "investigating" | "identified" | "monitoring" | "resolved";
 export type AlertEvent = "fail" | "degrade" | "recover";
@@ -80,6 +80,8 @@ export type HttpCheck = {
   body?: string;
   expect: HttpExpect;
   degradedIf?: { latencyMs: number };
+  failWhen?: FailWhen;
+  confirmFails?: number;
   critical?: boolean;
 };
 
@@ -89,6 +91,7 @@ export type HeartbeatCheck = {
   name?: string;
   intervalMs: number;
   graceMs: number;
+  confirmFails?: number;
   critical?: boolean;
 };
 
@@ -167,7 +170,11 @@ function assertId(id: string, label: string) {
 }
 
 function resolveHosts(url: string, allowedHosts?: string[]): string[] {
-  const host = new URL(url).hostname.toLowerCase();
+  const parsed = new URL(url);
+  if (!parsed.hostname || !["https:", "http:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error("check URL must be an http(s) URL without credentials");
+  }
+  const host = parsed.hostname.toLowerCase();
   const hosts = (allowedHosts ?? [host]).map((h) => h.toLowerCase());
   if (!hosts.includes(host)) {
     throw new Error(`url host ${host} must be listed in allowedHosts`);
@@ -189,6 +196,8 @@ export type HttpInput = {
   body?: string;
   expect?: HttpExpect;
   degradedIf?: { latencyMs: number };
+  failWhen?: FailWhen;
+  confirmFails?: number;
   critical?: boolean;
 };
 
@@ -196,6 +205,7 @@ export type HeartbeatInput = {
   name?: string;
   interval: string | number;
   grace?: string | number;
+  confirmFails?: number;
   critical?: boolean;
 };
 
@@ -218,6 +228,8 @@ export function http(id: string, input: HttpInput): HttpCheck {
     body: input.body,
     expect: input.expect ?? { status: 200 },
     degradedIf: input.degradedIf,
+    failWhen: input.failWhen,
+    confirmFails: input.confirmFails,
     critical: input.critical,
   };
 }
@@ -230,6 +242,7 @@ export function heartbeat(id: string, input: HeartbeatInput): HeartbeatCheck {
     name: input.name,
     intervalMs: parseDuration(input.interval, "interval"),
     graceMs: parseDuration(input.grace ?? "2m", "grace"),
+    confirmFails: input.confirmFails,
     critical: input.critical,
   };
 }
@@ -255,7 +268,11 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
     if (check.intervalMs < MIN_INTERVAL_MS) {
       throw new Error(`check ${check.id} interval must be >= ${MIN_INTERVAL_MS}ms`);
     }
-    return check;
+    const confirmFails = check.confirmFails ?? defaults.confirmFails;
+    if (!Number.isInteger(confirmFails) || confirmFails < 1 || confirmFails > 10) {
+      throw new Error(`check ${check.id} confirmFails must be an integer from 1 to 10`);
+    }
+    return { ...check, confirmFails };
   }
   const regions = (check.regions.length ? check.regions : fallbackRegions).slice(0, MAX_REGIONS);
   const intervalMs = check.intervalMs || defaults.intervalMs;
@@ -264,8 +281,26 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
   if (intervalMs < MIN_INTERVAL_MS) {
     throw new Error(`check ${check.id} interval must be >= ${MIN_INTERVAL_MS}ms`);
   }
+  if (!Number.isInteger(retries) || retries < 0 || retries > 5) {
+    throw new Error(`check ${check.id} retries must be an integer from 0 to 5`);
+  }
+  const confirmFails = check.confirmFails ?? defaults.confirmFails;
+  if (!Number.isInteger(confirmFails) || confirmFails < 1 || confirmFails > 10) {
+    throw new Error(`check ${check.id} confirmFails must be an integer from 1 to 10`);
+  }
   for (const r of regions) {
     if (!REGIONS.includes(r)) throw new Error(`unknown region ${r}`);
+  }
+  if (Object.keys(check.headers).length > 50) throw new Error(`check ${check.id} has too many headers`);
+  for (const [name, value] of Object.entries(check.headers)) {
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(name)) throw new Error(`check ${check.id} has an invalid header name`);
+    if (typeof value === "string" && value.length > 8192) throw new Error(`check ${check.id} header value is too large`);
+    if (/authorization|proxy-authorization|api[-_]?key|token|secret|cookie/i.test(name) && typeof value === "string") {
+      throw new Error(`check ${check.id} sensitive header ${name} must use secret()`);
+    }
+  }
+  if (check.body && new TextEncoder().encode(check.body).byteLength > BODY_READ_LIMIT) {
+    throw new Error(`check ${check.id} body must be <= ${BODY_READ_LIMIT} bytes`);
   }
   return {
     ...check,
@@ -274,6 +309,8 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
     timeoutMs,
     retries,
     degradedIf: check.degradedIf ?? defaults.degradedIf,
+    failWhen: check.failWhen ?? defaults.failWhen,
+    confirmFails,
   };
 }
 
@@ -293,6 +330,12 @@ export function defineConfig(input: DefineConfigInput): FoxwatchConfig {
     failWhen: input.defaults?.failWhen ?? "majority",
     confirmFails: input.defaults?.confirmFails ?? DEFAULT_CONFIRM_FAILS,
   };
+  if (!Number.isInteger(defaults.retries) || defaults.retries < 0 || defaults.retries > 5) {
+    throw new Error("defaults.retries must be an integer from 0 to 5");
+  }
+  if (!Number.isInteger(defaults.confirmFails) || defaults.confirmFails < 1 || defaults.confirmFails > 10) {
+    throw new Error("defaults.confirmFails must be an integer from 1 to 10");
+  }
 
   const seen = new Set<string>();
   const groups: GroupDef[] = input.groups.map((g) => {
@@ -463,6 +506,7 @@ export function configFromYamlLike(raw: unknown): FoxwatchConfig {
             interval: (ch.interval as string | number) ?? "10m",
             grace: (ch.grace as string | number) ?? "2m",
             critical: Boolean(ch.critical),
+            confirmFails: ch.confirmFails as number | undefined,
           });
         }
         const headersIn = (ch.headers as Record<string, unknown>) ?? {};
@@ -484,6 +528,8 @@ export function configFromYamlLike(raw: unknown): FoxwatchConfig {
           body: ch.body ? String(ch.body) : undefined,
           expect: (ch.expect as HttpExpect) ?? { status: 200 },
           degradedIf: ch.degradedIf as { latencyMs: number } | undefined,
+          failWhen: ch.failWhen as FailWhen | undefined,
+          confirmFails: ch.confirmFails as number | undefined,
           critical: Boolean(ch.critical),
         });
       }),
@@ -538,6 +584,7 @@ export function dumpConfig(config: FoxwatchConfig): unknown {
               type: "heartbeat",
               interval: `${ch.intervalMs / 1000}s`,
               grace: `${ch.graceMs / 1000}s`,
+              confirmFails: ch.confirmFails,
               critical: ch.critical,
             };
           }
@@ -558,6 +605,8 @@ export function dumpConfig(config: FoxwatchConfig): unknown {
             headers,
             expect: ch.expect,
             degradedIf: ch.degradedIf,
+            failWhen: ch.failWhen,
+            confirmFails: ch.confirmFails,
             critical: ch.critical,
           };
         }),

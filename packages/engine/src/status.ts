@@ -11,7 +11,7 @@ export function componentStatus(
   inMaintenance = false,
 ): ComponentStatus {
   if (inMaintenance) return "maintenance";
-  if (runs.length === 0) return "operational";
+  if (runs.length === 0) return "unknown";
   const fails = runs.filter((r) => r.outcome === "fail").length;
   const degraded = runs.some((r) => r.outcome === "degraded");
   const failThreshold =
@@ -26,11 +26,13 @@ export function bannerStatus(
 ): BannerStatus {
   if (components.some((c) => c.critical && c.status === "failing")) return "failing";
   if (components.some((c) => c.status === "failing" || c.status === "degraded")) return "degraded";
+  if (components.length === 0 || components.some((c) => c.status === "unknown")) return "unknown";
   return "fully_operational";
 }
 
 /** Saturated tab-dot colors; distinct from the washed page tokens so a 16px favicon still reads. */
 export const STATUS_DOT_COLOR = {
+  unknown: "#64748b",
   fully_operational: "#0f9d7a",
   degraded: "#d97706",
   failing: "#e11d48",
@@ -39,7 +41,8 @@ export const STATUS_DOT_COLOR = {
 export function statusDotColor(banner: string): string {
   if (banner === "failing") return STATUS_DOT_COLOR.failing;
   if (banner === "degraded") return STATUS_DOT_COLOR.degraded;
-  return STATUS_DOT_COLOR.fully_operational;
+  if (banner === "fully_operational") return STATUS_DOT_COLOR.fully_operational;
+  return STATUS_DOT_COLOR.unknown;
 }
 
 export function confirmFlip(

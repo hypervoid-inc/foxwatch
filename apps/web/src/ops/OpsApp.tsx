@@ -14,6 +14,7 @@ type Overview = {
     siteName: string;
     banner: string;
     stale: boolean;
+    iconUrl?: string | null;
     incidents: Incident[];
   };
   me: Me;
@@ -82,6 +83,19 @@ export function OpsApp() {
   }, []);
 
   useEffect(() => {
+    if (gate !== "ready") return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    const timer = window.setInterval(refresh, 30_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [gate]);
+
+  useEffect(() => {
     function onPop() {
       setTab(tabFromPath(window.location.pathname));
     }
@@ -142,23 +156,23 @@ export function OpsApp() {
 
   useEffect(() => {
     if (overview?.snapshot.banner) {
-      applyStatusFavicon("/fox.png", overview.snapshot.banner);
+      applyStatusFavicon(overview.snapshot.iconUrl ?? "/fox.png", overview.snapshot.banner);
       return;
     }
     let cancelled = false;
     void fetch("/api/status.json")
       .then((res) => (res.ok ? res.json() : null))
-      .then((snap: { banner?: string } | null) => {
+      .then((snap: { banner?: string; iconUrl?: string | null } | null) => {
         if (cancelled) return;
-        applyStatusFavicon("/fox.png", snap?.banner ?? "fully_operational");
+        applyStatusFavicon(snap?.iconUrl ?? "/fox.png", snap?.banner ?? "unknown");
       })
       .catch(() => {
-        if (!cancelled) applyStatusFavicon("/fox.png", "fully_operational");
+        if (!cancelled) applyStatusFavicon("/fox.png", "unknown");
       });
     return () => {
       cancelled = true;
     };
-  }, [overview?.snapshot.banner]);
+  }, [overview?.snapshot.banner, overview?.snapshot.iconUrl]);
 
   async function setup(e: React.FormEvent) {
     e.preventDefault();
@@ -342,7 +356,7 @@ export function OpsApp() {
     <div className="ops-wrap">
       <header className="ops-head">
         <a className="flex items-center gap-2 font-semibold tracking-tight text-ink no-underline" href="/admin">
-          <FoxMark />
+          {overview.snapshot.iconUrl ? <img className="fox-mark rounded-[26%] object-cover" src={overview.snapshot.iconUrl} alt="" width="20" height="20" /> : <FoxMark />}
           {overview.snapshot.siteName}
         </a>
         <div className="ops-head-actions">
@@ -389,7 +403,13 @@ export function OpsApp() {
         ))}
       </nav>
       {tab === "checks" ? <Checks monitors={overview.monitors} secrets={secrets} onChange={load} /> : null}
-      {tab === "incidents" ? <Incidents incidents={overview.snapshot.incidents} onChange={load} /> : null}
+      {tab === "incidents" ? (
+        <Incidents
+          incidents={overview.snapshot.incidents}
+          components={[...new Map(overview.monitors.map((monitor) => [monitor.componentId ?? monitor.id, { id: monitor.componentId ?? monitor.id, name: monitor.componentName }])).values()]}
+          onChange={load}
+        />
+      ) : null}
       {tab === "activity" ? <Activity /> : null}
       {tab === "settings" ? (
         <Settings

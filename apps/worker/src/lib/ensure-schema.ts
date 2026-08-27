@@ -13,6 +13,7 @@ const STATEMENTS = [
   config_json TEXT NOT NULL,
   muted_until INTEGER,
   consecutive_fails INTEGER NOT NULL DEFAULT 0,
+  confirmed_outcome TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 )`,
@@ -27,6 +28,18 @@ const STATEMENTS = [
   error_snippet TEXT,
   checked_at INTEGER NOT NULL,
   PRIMARY KEY (monitor_id, region)
+)`,
+  `CREATE TABLE IF NOT EXISTS check_runs (
+  id TEXT PRIMARY KEY,
+  monitor_id TEXT NOT NULL,
+  region TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  latency_ms INTEGER,
+  status_code INTEGER,
+  colo TEXT,
+  error_class TEXT,
+  error_snippet TEXT,
+  checked_at INTEGER NOT NULL
 )`,
   `CREATE TABLE IF NOT EXISTS component_state (
   component_id TEXT PRIMARY KEY,
@@ -47,6 +60,7 @@ const STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS incidents (
   id TEXT PRIMARY KEY,
   component_id TEXT,
+  component_ids_json TEXT,
   status TEXT NOT NULL,
   impact TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -118,17 +132,20 @@ const STATEMENTS = [
 )`,
   `CREATE INDEX IF NOT EXISTS idx_monitors_component ON monitors(component_id)`,
   `CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents(created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_check_runs_monitor_time ON check_runs(monitor_id, checked_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_ops_sessions_user ON ops_sessions(user_id)`,
 ];
 
-const SCHEMA_VERSION = "4";
+const SCHEMA_VERSION = "6";
 
 const ALTERS = [
   "ALTER TABLE daily_uptime ADD COLUMN latency_sum INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE daily_uptime ADD COLUMN latency_count INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE daily_uptime ADD COLUMN latency_min INTEGER",
   "ALTER TABLE daily_uptime ADD COLUMN latency_max INTEGER",
+  "ALTER TABLE monitors ADD COLUMN confirmed_outcome TEXT",
+  "ALTER TABLE incidents ADD COLUMN component_ids_json TEXT",
 ];
 
 export async function ensureSchema(db: D1Database): Promise<void> {
@@ -146,6 +163,16 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       /* column already present on fresh CREATE */
     }
   }
+  // Versions before 6 accepted secret values into site_settings. They cannot
+  // be safely re-encrypted without a deployment-owned key, so remove them and
+  // require Worker secrets, matching the documented security model.
+  await db.prepare("DELETE FROM site_settings WHERE key = 'secret_values'").run();
+  const migrationTime = Date.now();
+  await db.prepare(`UPDATE incidents SET status = 'resolved', resolved_at = ?
+    WHERE auto = 1 AND resolved_at IS NULL AND rowid NOT IN (
+      SELECT MAX(rowid) FROM incidents WHERE auto = 1 AND resolved_at IS NULL GROUP BY component_id
+    )`).bind(migrationTime).run();
+  await db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_one_open_auto_incident ON incidents(component_id) WHERE auto = 1 AND resolved_at IS NULL").run();
   await db
     .prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
     .bind(SCHEMA_VERSION)

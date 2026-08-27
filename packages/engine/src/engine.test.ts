@@ -155,8 +155,8 @@ describe("runHttpProbe redirects", () => {
       fetchImpl,
     });
     expect(seen[0]?.auth).toBe("sekrit-value");
-    expect(seen[1]?.url).toContain("attacker.example");
-    expect(seen[1]?.auth).toBeUndefined();
+    expect(seen).toHaveLength(1);
+    expect(result.errorClass).toBe("redirect_host");
     expect(result.errorSnippet ?? "").not.toContain("sekrit-value");
   });
 });
@@ -182,6 +182,11 @@ describe("status math", () => {
     expect(statusDotColor("fully_operational")).toBe("#0f9d7a");
     expect(statusDotColor("degraded")).toBe("#d97706");
     expect(statusDotColor("failing")).toBe("#e11d48");
+    expect(statusDotColor("unknown")).toBe("#64748b");
+    expect(statusDotColor("unexpected")).toBe("#64748b");
+    expect(componentStatus([])).toBe("unknown");
+    expect(bannerStatus([])).toBe("unknown");
+    expect(bannerStatus([{ status: "unknown", critical: true }])).toBe("unknown");
     expect(componentStatus([], "majority", true)).toBe("maintenance");
     expect(bannerStatus([{ status: "maintenance", critical: true }])).toBe("fully_operational");
     expect(confirmFlip(2, "fail", 3).confirmedFail).toBe(true);

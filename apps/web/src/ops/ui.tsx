@@ -114,6 +114,48 @@ export function Field({
   );
 }
 
+export function InfoTip({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const popRef = useRef<HTMLSpanElement>(null);
+
+  function position() {
+    const el = ref.current;
+    const pop = popRef.current;
+    if (!el || !pop) return;
+    const rect = el.getBoundingClientRect();
+    const popRect = pop.getBoundingClientRect();
+    // Try below first
+    let top = rect.bottom + 6;
+    let left = rect.left + rect.width / 2 - popRect.width / 2;
+    // If below goes off screen, show above
+    if (top + popRect.height > window.innerHeight - 8) {
+      top = rect.top - popRect.height - 6;
+    }
+    // Keep within horizontal bounds
+    if (left < 8) left = 8;
+    if (left + popRect.width > window.innerWidth - 8) left = window.innerWidth - popRect.width - 8;
+    pop.style.top = `${top}px`;
+    pop.style.left = `${left}px`;
+  }
+
+  return (
+    <span
+      className="info-tip"
+      ref={ref}
+      tabIndex={0}
+      aria-label={typeof children === "string" ? children : "More information"}
+      onMouseEnter={position}
+      onFocus={position}
+    >
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.25" />
+        <path d="M8 7.1v4M8 4.7h.01" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+      <span className="info-tip-pop" ref={popRef} role="tooltip">{children}</span>
+    </span>
+  );
+}
+
 export function ErrorText({ children }: { children: ReactNode }) {
   return (
     <p className="text-sm text-bad" role="alert">

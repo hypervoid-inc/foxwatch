@@ -14,6 +14,7 @@ export const monitors = sqliteTable("monitors", {
   configJson: text("config_json").notNull(),
   mutedUntil: integer("muted_until"),
   consecutiveFails: integer("consecutive_fails").notNull().default(0),
+  confirmedOutcome: text("confirmed_outcome").$type<"pass" | "degraded" | "fail">(),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -33,6 +34,19 @@ export const checkLatest = sqliteTable(
   },
   (t) => ({ pk: primaryKey({ columns: [t.monitorId, t.region] }) }),
 );
+
+export const checkRuns = sqliteTable("check_runs", {
+  id: text("id").primaryKey(),
+  monitorId: text("monitor_id").notNull(),
+  region: text("region").notNull(),
+  outcome: text("outcome").notNull(),
+  latencyMs: integer("latency_ms"),
+  statusCode: integer("status_code"),
+  colo: text("colo"),
+  errorClass: text("error_class"),
+  errorSnippet: text("error_snippet"),
+  checkedAt: integer("checked_at").notNull(),
+});
 
 export const componentState = sqliteTable("component_state", {
   componentId: text("component_id").primaryKey(),
@@ -58,6 +72,7 @@ export const dailyUptime = sqliteTable(
 export const incidents = sqliteTable("incidents", {
   id: text("id").primaryKey(),
   componentId: text("component_id"),
+  componentIdsJson: text("component_ids_json"),
   status: text("status").notNull(),
   impact: text("impact").notNull(),
   title: text("title").notNull(),
