@@ -9,6 +9,7 @@ import * as schema from "./db/schema.ts";
 import { deliverAlert, type AlertBody } from "./lib/alerts.ts";
 import { isWorkerPath } from "./lib/routes.ts";
 import { ensureSchema } from "./lib/ensure-schema.ts";
+import { internalErrorResponse } from "./lib/ops-error.ts";
 
 export { Probe, Monitor, Scheduler, StatusHub };
 
@@ -22,17 +23,22 @@ async function maybeBootstrap(env: Env, ctx: ExecutionContext): Promise<void> {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    if (!isWorkerPath(url.pathname)) {
-      return env.ASSETS.fetch(request);
+    try {
+      const url = new URL(request.url);
+      if (!isWorkerPath(url.pathname)) {
+        return env.ASSETS.fetch(request);
+      }
+      if (url.pathname === "/live") {
+        return statusHubStub(env).fetch(request);
+      }
+      await ensureSchema(env.DB);
+      const cached = await env.STATUS.get("snapshot:public");
+      if (!cached) await maybeBootstrap(env, ctx);
+      return app.fetch(request, env, ctx);
+    } catch (err) {
+      console.error("fetch failed", err);
+      return internalErrorResponse();
     }
-    if (url.pathname === "/live") {
-      return statusHubStub(env).fetch(request);
-    }
-    await ensureSchema(env.DB);
-    const cached = await env.STATUS.get("snapshot:public");
-    if (!cached) await maybeBootstrap(env, ctx);
-    return app.fetch(request, env, ctx);
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {

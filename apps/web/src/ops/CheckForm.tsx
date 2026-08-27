@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api.ts";
-import { mutationError, regionLabel, regionTitle } from "./labels.ts";
+import { regionLabel, regionTitle } from "./labels.ts";
 import { CopyPanel, ErrorText, InfoTip, Mark, Seg, useActionFlash } from "./ui.tsx";
 
 const METHODS = ["GET", "HEAD", "POST"] as const;
@@ -324,7 +324,7 @@ export function CheckForm({
     });
     setTestPending(false);
     if (!res.ok) {
-      setError(mutationError(res.error, "Test request failed."));
+      setError(res.error);
       return;
     }
     setTestResult(res.data);
@@ -447,7 +447,7 @@ export function CheckForm({
       : await api<{ ok: boolean }>("/api/ops/monitors", { method: "POST", body: JSON.stringify(payload) });
     if (!res.ok) {
       setPending(false);
-      setError(mutationError(res.error, "Could not save this check."));
+      setError(res.error);
       return;
     }
     setPending(false);

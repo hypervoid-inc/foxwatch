@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "./api.ts";
-import { impactLabel, incidentStatusLabel, mutationError } from "./labels.ts";
+import { impactLabel, incidentStatusLabel } from "./labels.ts";
 import { ErrorText, Field, Mark, Timeline, useActionFlash } from "./ui.tsx";
 
 export type Incident = {
@@ -66,7 +66,7 @@ export function Incidents({
     });
     setPending(false);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not publish incident."));
+      setError(res.error);
       return;
     }
     setTitle("");
@@ -232,7 +232,7 @@ function IncidentUpdate({
         const res = await api(`/api/ops/incidents/${id}/updates`, { method: "POST", body: JSON.stringify({ status, body, notify }) });
         setPending(false);
         if (!res.ok) {
-          onError(mutationError(res.error, "Could not post that update."));
+          onError(res.error);
           return;
         }
         setBody("");

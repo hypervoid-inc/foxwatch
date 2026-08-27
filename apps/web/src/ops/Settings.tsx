@@ -67,7 +67,7 @@ export function Settings({
     const res = await api("/api/ops/settings", { method: "PATCH", body: JSON.stringify({ siteName: name, homepageUrl }) });
     setPending(false);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not save public site."));
+      setError(res.error);
       return;
     }
     await onChange();
@@ -87,7 +87,7 @@ export function Settings({
       if (value.trim()) payload.value = value.trim();
       const res = await api("/api/ops/secrets", { method: "POST", body: JSON.stringify(payload) });
       if (!res.ok) {
-        setError(mutationError(res.error, "Could not save that secret."));
+        setError(res.error);
         return;
       }
       setNextName("");
@@ -117,7 +117,7 @@ export function Settings({
       const res = await api(`/api/ops/secrets/${encodeURIComponent(n)}`, { method: "DELETE" });
       setPendingRemove(null);
       if (!res.ok) {
-        setError(mutationError(res.error, "Could not remove that secret."));
+        setError(res.error);
         return;
       }
       await refresh();
@@ -136,7 +136,7 @@ export function Settings({
       body.append("file", prepared);
       const res = await apiUpload<{ iconUrl: string }>("/api/ops/settings/icon", body);
       if (!res.ok) {
-        setError(mutationError(res.error, "Could not save that icon."));
+        setError(res.error);
         return;
       }
       setIconUrl(res.data.iconUrl);
@@ -153,7 +153,7 @@ export function Settings({
     setError(null);
     const res = await api("/api/ops/settings/icon", { method: "DELETE" });
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not remove that icon."));
+      setError(res.error);
       return;
     }
     setIconUrl(null);
@@ -395,7 +395,7 @@ function AlertChannels({
     });
     setPending(false);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not save that alert channel."));
+      setError(res.error);
       return;
     }
     await Promise.all([refresh(), onSecretsChange()]);
@@ -404,7 +404,7 @@ function AlertChannels({
   async function remove(channelId: string) {
     const res = await api(`/api/ops/alert-channels/${channelId}`, { method: "DELETE" });
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not remove that alert channel."));
+      setError(res.error);
       return;
     }
     await refresh();
@@ -414,7 +414,7 @@ function AlertChannels({
     setError(null);
     const res = await api(`/api/ops/alert-channels/${channelId}/test`, { method: "POST", body: "{}" });
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not deliver a test alert."));
+      setError(res.error);
       return;
     }
     setTested(channelId);
@@ -528,11 +528,7 @@ function Operators({ me }: { me: Me }) {
     const res = await api("/api/ops/users", { method: "POST", body: JSON.stringify({ email, password, role }) });
     setPending(false);
     if (!res.ok) {
-      setError(
-        res.error === "exists"
-          ? "That email already has an account."
-          : mutationError(res.error, "Use a valid email and a password of at least 12 characters."),
-      );
+      setError(res.error);
       return;
     }
     setEmail("");
@@ -546,7 +542,7 @@ function Operators({ me }: { me: Me }) {
     const res = await api(`/api/ops/users/${id}`, { method: "DELETE" });
     setPendingRemove(null);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not remove that operator."));
+      setError(res.error);
       return;
     }
     await refresh();

@@ -40,6 +40,7 @@ import {
   revokeSession,
   setupFirstUser,
 } from "./auth/accounts.ts";
+import { fail, failFromUnknown } from "./lib/ops-error.ts";
 
 const PUBLIC_HEADERS = {
   "content-security-policy":
@@ -61,6 +62,11 @@ const OPS_HEADERS = {
 };
 
 export const app = new Hono<{ Bindings: Env; Variables: { actor: string; opsRole: OpsRole; opsUserId: string } }>();
+
+app.onError((err, c) => {
+  console.error(err);
+  return fail(c, 500, "internal");
+});
 
 app.use("*", async (c, next) => {
   await next();
@@ -149,22 +155,26 @@ app.get("/api/ops/auth", async (c) => {
 });
 
 app.post("/api/ops/setup", async (c) => {
-  if (!csrfOk(c.req.raw)) return c.json({ error: "forbidden" }, 403);
+  if (!csrfOk(c.req.raw)) return fail(c, 403, "forbidden");
   const body = (await c.req.json().catch(() => null)) as { email?: unknown; password?: unknown } | null;
   const result = await setupFirstUser(c.env, body?.email, body?.password);
-  if (!result.ok) return c.json({ error: result.error }, result.error === "exists" ? 409 : 400);
+  if (!result.ok) {
+    if (result.error === "exists") return fail(c, 409, "exists", "An account already exists. Sign in instead.");
+    return fail(c, 400, result.error);
+  }
   c.header("set-cookie", opsCookie(result.token, c.req.raw));
   await audit(c.env, result.user.email, "setup-superadmin", undefined, { id: result.user.id });
   return c.json({ ok: true, me: result.user });
 });
 
 app.post("/api/ops/session", async (c) => {
-  if (!csrfOk(c.req.raw)) return c.json({ error: "forbidden" }, 403);
+  if (!csrfOk(c.req.raw)) return fail(c, 403, "forbidden");
   const body = (await c.req.json().catch(() => null)) as { email?: unknown; password?: unknown } | null;
   const result = await loginUser(c.env, body?.email, body?.password, clientIp(c.req.raw));
   if (!result.ok) {
-    const status = result.error === "rate" ? 429 : result.error === "setup" ? 409 : 401;
-    return c.json({ error: result.error }, status);
+    if (result.error === "rate") return fail(c, 429, "rate");
+    if (result.error === "setup") return fail(c, 409, "setup");
+    return fail(c, 401, "credentials");
   }
   c.header("set-cookie", opsCookie(result.token, c.req.raw));
   await audit(c.env, result.user.email, "login");
@@ -172,7 +182,7 @@ app.post("/api/ops/session", async (c) => {
 });
 
 app.delete("/api/ops/session", async (c) => {
-  if (!csrfOk(c.req.raw)) return c.json({ error: "forbidden" }, 403);
+  if (!csrfOk(c.req.raw)) return fail(c, 403, "forbidden");
   await revokeSession(c.env, sessionTokenFromRequest(c.req.raw));
   c.header("set-cookie", clearOpsCookie(c.req.raw));
   return c.json({ ok: true });
@@ -180,9 +190,9 @@ app.delete("/api/ops/session", async (c) => {
 
 app.use("/api/ops/*", async (c, next) => {
   if (isOpenOpsPath(c.req.path, c.req.method)) return next();
-  if (!csrfOk(c.req.raw)) return c.json({ error: "forbidden" }, 403);
+  if (!csrfOk(c.req.raw)) return fail(c, 403, "forbidden");
   const actor = await authorizeOps(c.req.raw, c.env);
-  if (!actor) return c.json({ error: "auth" }, 401);
+  if (!actor) return fail(c, 401, "auth");
   c.set("actor", actor.actor);
   c.set("opsRole", actor.role);
   c.set("opsUserId", actor.userId);
@@ -243,7 +253,7 @@ app.get("/api/ops/overview", async (c) => {
 });
 
 app.get("/api/ops/users", async (c) => {
-  if (opsActorOf(c).role !== "superadmin") return c.json({ error: "forbidden" }, 403);
+  if (opsActorOf(c).role !== "superadmin") return fail(c, 403, "forbidden");
   return c.json({ users: await listOperators(c.env) });
 });
 
@@ -251,8 +261,9 @@ app.post("/api/ops/users", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { email?: unknown; password?: unknown; role?: unknown };
   const result = await createOperator(c.env, opsActorOf(c), body.email, body.password, body.role);
   if (!result.ok) {
-    const status = result.error === "forbidden" ? 403 : result.error === "exists" ? 409 : 400;
-    return c.json({ error: result.error }, status);
+    if (result.error === "forbidden") return fail(c, 403, "forbidden");
+    if (result.error === "exists") return fail(c, 409, "exists", "That email already has an account.");
+    return fail(c, 400, result.error);
   }
   await audit(c.env, actorOf(c), "create-user", undefined, { id: result.user.id, email: result.user.email, role: result.user.role });
   return c.json({ ok: true, user: result.user });
@@ -261,8 +272,8 @@ app.post("/api/ops/users", async (c) => {
 app.delete("/api/ops/users/:id", async (c) => {
   const result = await deleteOperator(c.env, opsActorOf(c), c.req.param("id"));
   if (!result.ok) {
-    const status = result.error === "forbidden" || result.error === "self" || result.error === "last_superadmin" ? 403 : 404;
-    return c.json({ error: result.error }, status);
+    if (result.error === "not_found") return fail(c, 404, "not_found");
+    return fail(c, 403, result.error);
   }
   await audit(c.env, actorOf(c), "delete-user", undefined, { id: c.req.param("id") });
   return c.json({ ok: true });
@@ -282,7 +293,7 @@ app.get("/api/ops/secrets", async (c) => {
 });
 
 app.post("/api/ops/secrets", async (c) => {
-  if (opsActorOf(c).role !== "superadmin") return c.json({ error: "forbidden" }, 403);
+  if (opsActorOf(c).role !== "superadmin") return fail(c, 403, "forbidden");
   const body = (await c.req.json().catch(() => null)) as { name?: unknown; value?: unknown } | null;
   const name = typeof body?.name === "string" ? body.name.trim().toUpperCase() : "";
   const value = typeof body?.value === "string" ? body.value : "";
@@ -290,16 +301,16 @@ app.post("/api/ops/secrets", async (c) => {
     secretName({ __foxwatch_secret__: name });
     if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name)) throw new Error("name");
   } catch {
-    return c.json({ error: "secret" }, 400);
+    return fail(c, 400, "secret");
   }
   if (value) {
-    if (new TextEncoder().encode(value).byteLength > 8192) return c.json({ error: "secret_value" }, 400);
+    if (new TextEncoder().encode(value).byteLength > 8192) return fail(c, 400, "secret_value");
     const rotating = Boolean(envSecret(c.env, name));
     try {
       await putWorkerSecret(c.env, name, value);
     } catch (error) {
       const code = error instanceof WorkerSecretError ? error.code : "cloudflare_api";
-      return c.json({ error: code }, 503);
+      return fail(c, 503, code);
     }
     await rememberSecretNames(c.env, [name]);
     await audit(c.env, actorOf(c), rotating ? "rotate-secret" : "create-secret", undefined, { name });
@@ -334,7 +345,7 @@ app.post("/api/ops/alert-channels", async (c) => {
     ? [...new Set(body.events.map(String).filter((event) => ["fail", "degrade", "recover"].includes(event)))]
     : [];
   if (!ID_RE.test(id) || !type || !/^[A-Z][A-Z0-9_]{0,127}$/.test(secret) || events.length === 0) {
-    return c.json({ error: "alert_channel" }, 400);
+    return fail(c, 400, "alert_channel");
   }
   const db = drizzle(c.env.DB, { schema });
   await db.insert(schema.alertChannels).values({ id, type, secretName: secret, eventsJson: JSON.stringify(events) })
@@ -356,7 +367,7 @@ app.post("/api/ops/alert-channels/:id/test", async (c) => {
   const id = c.req.param("id");
   const db = drizzle(c.env.DB, { schema });
   const channel = (await db.select().from(schema.alertChannels).where(eq(schema.alertChannels.id, id)))[0];
-  if (!channel) return c.json({ error: "not_found" }, 404);
+  if (!channel) return fail(c, 404, "not_found");
   try {
     const configured = JSON.parse(channel.eventsJson) as Array<"fail" | "degrade" | "recover">;
     await deliverAlert(c.env, { type: channel.type, secretName: channel.secretName, events: configured }, {
@@ -366,16 +377,16 @@ app.post("/api/ops/alert-channels/:id/test", async (c) => {
       title: "Test alert — delivery is configured",
     });
   } catch {
-    return c.json({ error: "delivery" }, 503);
+    return fail(c, 503, "delivery");
   }
   await audit(c.env, actorOf(c), "test-alert-channel", undefined, { id });
   return c.json({ ok: true });
 });
 
 app.delete("/api/ops/secrets/:name", async (c) => {
-  if (opsActorOf(c).role !== "superadmin") return c.json({ error: "forbidden" }, 403);
+  if (opsActorOf(c).role !== "superadmin") return fail(c, 403, "forbidden");
   const name = c.req.param("name").toUpperCase();
-  if (envSecret(c.env, name)) return c.json({ error: "rotate_only" }, 409);
+  if (envSecret(c.env, name)) return fail(c, 409, "rotate_only");
   const current = await loadSettings(c.env);
   await saveSettings(c.env, { ...current, secrets: current.secrets.filter((n) => n !== name) });
   await audit(c.env, actorOf(c), "delete-secret", undefined, { name });
@@ -400,7 +411,7 @@ app.patch("/api/ops/settings", async (c) => {
     try {
       homepageUrl = parseHomepageUrl(body.homepageUrl);
     } catch {
-      return c.json({ error: "invalid_url" }, 400);
+      return fail(c, 400, "invalid_url");
     }
   }
   const next = await saveSettings(c.env, {
@@ -422,14 +433,14 @@ app.patch("/api/ops/settings", async (c) => {
 app.post("/api/ops/settings/icon", async (c) => {
   const form = await c.req.formData().catch(() => null);
   const file = form?.get("file");
-  if (!(file instanceof File)) return c.json({ error: "icon" }, 400);
+  if (!(file instanceof File)) return fail(c, 400, "icon");
   try {
     const next = await saveIcon(c.env, new Uint8Array(await file.arrayBuffer()));
     await audit(c.env, actorOf(c), "update-icon");
     await publishSnapshot(c.env);
     return c.json({ iconUrl: `/icon?v=${next.iconUpdatedAt}` });
   } catch {
-    return c.json({ error: "icon" }, 400);
+    return fail(c, 400, "icon");
   }
 });
 
@@ -443,7 +454,7 @@ app.delete("/api/ops/settings/icon", async (c) => {
 app.get("/api/ops/audit", async (c) => {
   const limit = parseAuditLimit(c.req.query("limit"));
   const cursor = parseAuditCursor(c.req.query("cursor"));
-  if (cursor === "invalid") return c.json({ error: "invalid_cursor" }, 400);
+  if (cursor === "invalid") return fail(c, 400, "invalid_cursor");
   const db = drizzle(c.env.DB, { schema });
   const pageWhere = cursor
     ? or(
@@ -464,7 +475,7 @@ app.post("/api/ops/monitors/:id/run", async (c) => {
   const id = c.req.param("id");
   const db = drizzle(c.env.DB, { schema });
   const row = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
-  if (!row) return c.json({ error: "not_found" }, 404);
+  if (!row) return fail(c, 404, "not_found");
   if (row.mutedUntil != null && row.mutedUntil > Date.now()) return c.json({ ok: true, skipped: "muted" });
   const now = Date.now();
   const maintenance = await db.select().from(schema.maintenance).where(eq(schema.maintenance.componentId, row.componentId));
@@ -481,7 +492,7 @@ app.get("/api/ops/monitors/:id/runs", async (c) => {
   const limit = Math.min(5, Math.max(1, Number(c.req.query("limit") ?? 5) || 5));
   const db = drizzle(c.env.DB, { schema });
   const monitor = (await db.select({ id: schema.monitors.id }).from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
-  if (!monitor) return c.json({ error: "not_found" }, 404);
+  if (!monitor) return fail(c, 404, "not_found");
   const runs = await db
     .select()
     .from(schema.checkRuns)
@@ -493,14 +504,14 @@ app.get("/api/ops/monitors/:id/runs", async (c) => {
 
 app.post("/api/ops/monitors/test-request", async (c) => {
   const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
-  if (!body) return c.json({ error: "invalid" }, 400);
+  if (!body) return fail(c, 400, "invalid");
   let check: Check;
   try {
     check = parseCheckInput({ ...body, id: "test-request", type: "http", interval: "1m" });
   } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "invalid" }, 400);
+    return failFromUnknown(c, error);
   }
-  if (check.type !== "http") return c.json({ error: "invalid" }, 400);
+  if (check.type !== "http") return fail(c, 400, "invalid");
   const secrets = await loadSecretMap(c.env, secretNamesFromCheck(check));
   const result = await runHttpProbe(check, {
     secrets,
@@ -523,10 +534,10 @@ app.post("/api/ops/monitors/:id/mute", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { until?: number | null };
   const db = drizzle(c.env.DB, { schema });
   const row = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
-  if (!row) return c.json({ error: "not_found" }, 404);
+  if (!row) return fail(c, 404, "not_found");
   const until = body.until == null ? null : Number(body.until);
   if (until != null && (!Number.isFinite(until) || until <= Date.now() || until - Date.now() > 90 * 24 * 60 * 60 * 1000)) {
-    return c.json({ error: "mute_until" }, 400);
+    return fail(c, 400, "mute_until");
   }
   await db.update(schema.monitors).set({ mutedUntil: until, updatedAt: Date.now() }).where(eq(schema.monitors.id, id));
   if (until == null) await monitorStub(c.env, id).reschedule(1);
@@ -539,7 +550,7 @@ app.post("/api/ops/heartbeats/:id/rotate", async (c) => {
   const id = c.req.param("id");
   const db = drizzle(c.env.DB, { schema });
   const monitor = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
-  if (!monitor || monitor.type !== "heartbeat") return c.json({ error: "not_found" }, 404);
+  if (!monitor || monitor.type !== "heartbeat") return fail(c, 404, "not_found");
   const token = randomToken();
   const tokenHash = await sha256Hex(token);
   const now = Date.now();
@@ -556,25 +567,25 @@ app.post("/api/ops/heartbeats/:id/rotate", async (c) => {
 app.post("/api/ops/monitors", async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const count = (await db.select().from(schema.monitors)).length;
-  if (count >= MAX_MONITORS) return c.json({ error: "quota" }, 400);
+  if (count >= MAX_MONITORS) return fail(c, 400, "quota");
   const body = (await c.req.json()) as Record<string, unknown>;
   const id = String(body.id ?? "");
-  if (!ID_RE.test(id)) return c.json({ error: "invalid_id" }, 400);
+  if (!ID_RE.test(id)) return fail(c, 400, "invalid_id");
   const existing = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
-  if (existing) return c.json({ error: "exists" }, 409);
+  if (existing) return fail(c, 409, "exists", "A check with this id already exists.");
   let check: Check;
   try {
     check = parseCheckInput(body);
     if (check.type === "http") assertSafeUrl(check.url, { allowHttpLocal: allowHttpLocal(c.env) });
   } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : "invalid" }, 400);
+    return failFromUnknown(c, err);
   }
   const now = Date.now();
   const groupName = sanitizeText(String(body.groupName ?? "Custom"), 80) || "Custom";
   const componentName = sanitizeText(String(body.componentName ?? body.name ?? id), 80) || id;
   const groupId = String(body.groupId ?? "custom");
   const componentId = String(body.componentId ?? id);
-  if (!ID_RE.test(groupId) || !ID_RE.test(componentId)) return c.json({ error: "invalid_id" }, 400);
+  if (!ID_RE.test(groupId) || !ID_RE.test(componentId)) return fail(c, 400, "invalid_id");
   await db.insert(schema.monitors).values({
     id,
     origin: "ui",
@@ -604,7 +615,7 @@ app.patch("/api/ops/monitors/:id", async (c) => {
   const id = c.req.param("id");
   const db = drizzle(c.env.DB, { schema });
   const row = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
-  if (!row) return c.json({ error: "not_found" }, 404);
+  if (!row) return fail(c, 404, "not_found");
   const body = (await c.req.json()) as Record<string, unknown>;
   const existingCheck = JSON.parse(row.configJson) as Check;
   let check: Check;
@@ -612,13 +623,13 @@ app.patch("/api/ops/monitors/:id", async (c) => {
     check = parseCheckInput({ ...existingCheck, ...body, id, type: body.type ?? existingCheck.type });
     if (check.type === "http") assertSafeUrl(check.url, { allowHttpLocal: allowHttpLocal(c.env) });
   } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : "invalid" }, 400);
+    return failFromUnknown(c, err);
   }
   const drifted = row.origin === "git" ? 1 : 0;
   const executionChanged = checkExecutionKey(check) !== checkExecutionKey(existingCheck);
   const nextGroupId = String(body.groupId ?? row.groupId);
   const nextComponentId = String(body.componentId ?? row.componentId);
-  if (!ID_RE.test(nextGroupId) || !ID_RE.test(nextComponentId)) return c.json({ error: "invalid_id" }, 400);
+  if (!ID_RE.test(nextGroupId) || !ID_RE.test(nextComponentId)) return fail(c, 400, "invalid_id");
   await db
     .update(schema.monitors)
     .set({
@@ -666,7 +677,7 @@ app.delete("/api/ops/monitors/:id", async (c) => {
   const id = c.req.param("id");
   const db = drizzle(c.env.DB, { schema });
   const row = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
-  if (!row) return c.json({ error: "not_found" }, 404);
+  if (!row) return fail(c, 404, "not_found");
   await db.delete(schema.monitors).where(eq(schema.monitors.id, id));
   await db.delete(schema.heartbeats).where(eq(schema.heartbeats.monitorId, id));
   await db.delete(schema.checkLatest).where(eq(schema.checkLatest.monitorId, id));
@@ -692,7 +703,7 @@ app.get("/api/ops/components/:id/maintenance", async (c) => {
   const id = c.req.param("id");
   const db = drizzle(c.env.DB, { schema });
   const monitor = (await db.select().from(schema.monitors).where(eq(schema.monitors.componentId, id)))[0];
-  if (!monitor) return c.json({ error: "not_found" }, 404);
+  if (!monitor) return fail(c, 404, "not_found");
   const now = Date.now();
   const rows = await db.select().from(schema.maintenance).where(eq(schema.maintenance.componentId, id));
   const upcoming = rows.filter((w) => w.endAt > now).sort((a, b) => a.startAt - b.startAt);
@@ -705,18 +716,18 @@ app.post("/api/ops/components/:id/maintenance", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { note?: unknown; startAt?: unknown; endAt?: unknown };
   const db = drizzle(c.env.DB, { schema });
   const monitor = (await db.select().from(schema.monitors).where(eq(schema.monitors.componentId, id)))[0];
-  if (!monitor) return c.json({ error: "not_found" }, 404);
+  if (!monitor) return fail(c, 404, "not_found");
   const now = Date.now();
   const startAt = body.startAt == null ? now : Number(body.startAt);
   const endAt = Number(body.endAt);
   if (!Number.isFinite(startAt) || startAt < now - 60_000 || startAt - now > 90 * 24 * 60 * 60 * 1000) {
-    return c.json({ error: "start_at" }, 400);
+    return fail(c, 400, "start_at");
   }
   if (!Number.isFinite(endAt) || endAt <= startAt || endAt - startAt > 90 * 24 * 60 * 60 * 1000) {
-    return c.json({ error: "end_at" }, 400);
+    return fail(c, 400, "end_at");
   }
   const rows = await db.select().from(schema.maintenance).where(eq(schema.maintenance.componentId, id));
-  if (rows.some((w) => w.startAt < endAt && w.endAt > startAt)) return c.json({ error: "overlap" }, 409);
+  if (rows.some((w) => w.startAt < endAt && w.endAt > startAt)) return fail(c, 409, "overlap");
   const window = {
     id: newId(),
     componentId: id,
@@ -738,7 +749,7 @@ app.delete("/api/ops/components/:id/maintenance", async (c) => {
   const target = rows
     .filter((w) => w.endAt > now)
     .sort((a, b) => a.startAt - b.startAt)[0];
-  if (!target) return c.json({ error: "not_found" }, 404);
+  if (!target) return fail(c, 404, "not_found");
   if (target.startAt > now) await db.delete(schema.maintenance).where(eq(schema.maintenance.id, target.id));
   else await db.update(schema.maintenance).set({ endAt: now }).where(eq(schema.maintenance.id, target.id));
   await audit(c.env, actorOf(c), target.startAt > now ? "cancel-maintenance" : "end-maintenance", undefined, { componentId: id, id: target.id });
@@ -753,7 +764,7 @@ app.delete("/api/ops/components/:id/maintenance/:windowId", async (c) => {
   const target = (await db.select().from(schema.maintenance).where(
     and(eq(schema.maintenance.id, windowId), eq(schema.maintenance.componentId, componentId)),
   ))[0];
-  if (!target || target.endAt <= Date.now()) return c.json({ error: "not_found" }, 404);
+  if (!target || target.endAt <= Date.now()) return fail(c, 404, "not_found");
   const now = Date.now();
   if (target.startAt > now) await db.delete(schema.maintenance).where(eq(schema.maintenance.id, target.id));
   else await db.update(schema.maintenance).set({ endAt: now }).where(eq(schema.maintenance.id, target.id));
@@ -768,16 +779,16 @@ app.post("/api/ops/incidents", async (c) => {
   const now = Date.now();
   const createdAt = body.startedAt == null ? now : Number(body.startedAt);
   if (!Number.isFinite(createdAt) || createdAt > now + 60_000 || createdAt < now - 365 * 86_400_000) {
-    return c.json({ error: "incident_time" }, 400);
+    return fail(c, 400, "incident_time");
   }
   const db = drizzle(c.env.DB, { schema });
   const title = sanitizeText(body.title ?? "", 200);
-  if (!title) return c.json({ error: "title" }, 400);
+  if (!title) return fail(c, 400, "title");
   const requested = Array.isArray(body.componentIds)
     ? [...new Set(body.componentIds.filter((id): id is string => typeof id === "string"))]
     : body.componentId ? [body.componentId] : [];
   const known = new Set((await db.select({ id: schema.monitors.componentId }).from(schema.monitors)).map((row) => row.id));
-  if (requested.some((id) => !known.has(id))) return c.json({ error: "component" }, 400);
+  if (requested.some((id) => !known.has(id))) return fail(c, 400, "component");
   await db.insert(schema.incidents).values({
     id,
     componentId: requested[0] ?? null,
@@ -814,13 +825,13 @@ app.post("/api/ops/incidents/:id/updates", async (c) => {
   const body = (await c.req.json()) as { status?: string; body?: string; notify?: unknown };
   const db = drizzle(c.env.DB, { schema });
   const incident = (await db.select().from(schema.incidents).where(eq(schema.incidents.id, id)))[0];
-  if (!incident) return c.json({ error: "not_found" }, 404);
+  if (!incident) return fail(c, 404, "not_found");
   const now = Date.now();
   const status = ["investigating", "identified", "monitoring", "resolved"].includes(String(body.status))
     ? String(body.status)
     : "monitoring";
   const updateText = sanitizeText(body.body ?? "", 2000);
-  if (!updateText) return c.json({ error: "update_body" }, 400);
+  if (!updateText) return fail(c, 400, "update_body");
   await db.insert(schema.incidentUpdates).values({
     id: newId(),
     incidentId: id,

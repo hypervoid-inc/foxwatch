@@ -188,14 +188,8 @@ export function OpsApp() {
     });
     setPending(false);
     if (!res.ok) {
-      setError(
-        res.error === "exists"
-          ? "An account already exists. Sign in instead."
-          : res.status >= 500
-            ? "Could not create the account. Try again."
-            : "Use a valid email and a password of at least 12 characters.",
-      );
-      if (res.status === 409) setGate("login");
+      setError(res.error);
+      if (res.code === "exists" || res.status === 409) setGate("login");
       return;
     }
     setPassword("");
@@ -213,14 +207,8 @@ export function OpsApp() {
     });
     setPending(false);
     if (!res.ok) {
-      setError(
-        res.status === 429
-          ? "Too many attempts. Try again in a few minutes."
-          : res.error === "setup"
-            ? "Create the first account to continue."
-            : "Email or password is incorrect.",
-      );
-      if (res.error === "setup") setGate("setup");
+      setError(res.error);
+      if (res.code === "setup") setGate("setup");
       return;
     }
     setPassword("");

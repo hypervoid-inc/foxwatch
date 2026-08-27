@@ -72,10 +72,11 @@ export async function setupFirstUser(
   env: Env,
   emailRaw: unknown,
   passwordRaw: unknown,
-): Promise<{ ok: true; token: string; user: PublicUser } | { ok: false; error: "exists" | "invalid" }> {
+): Promise<{ ok: true; token: string; user: PublicUser } | { ok: false; error: "exists" | "invalid_email" | "invalid_password" }> {
   const email = parseEmail(emailRaw);
   const password = parsePassword(passwordRaw);
-  if (!email || !password) return { ok: false, error: "invalid" };
+  if (!email) return { ok: false, error: "invalid_email" };
+  if (!password) return { ok: false, error: "invalid_password" };
   if (!(await needsSetup(env))) return { ok: false, error: "exists" };
 
   const userId = newId();
@@ -111,11 +112,11 @@ export async function loginUser(
   emailRaw: unknown,
   passwordRaw: unknown,
   ip: string,
-): Promise<{ ok: true; token: string; user: PublicUser } | { ok: false; error: "auth" | "rate" | "invalid" | "setup" }> {
+): Promise<{ ok: true; token: string; user: PublicUser } | { ok: false; error: "credentials" | "rate" | "setup" }> {
   if (await needsSetup(env)) return { ok: false, error: "setup" };
   const email = parseEmail(emailRaw);
   const password = typeof passwordRaw === "string" ? passwordRaw : "";
-  if (!email || password.length < 1 || password.length > 128) return { ok: false, error: "invalid" };
+  if (!email || password.length < 1 || password.length > 128) return { ok: false, error: "credentials" };
 
   const emailKey = `login:${email}`;
   const ipKey = `login-ip:${ip || "unknown"}`;
@@ -125,7 +126,7 @@ export async function loginUser(
   const user = (await db.select().from(schema.opsUsers).where(eq(schema.opsUsers.email, email)))[0];
   const hash = user?.passwordHash ?? (await dummyPasswordHash());
   const matches = await verifyPassword(password, hash);
-  if (!user || !matches) return { ok: false, error: "auth" };
+  if (!user || !matches) return { ok: false, error: "credentials" };
 
   await clearThrottle(env, emailKey);
   await clearThrottle(env, ipKey);
@@ -151,13 +152,14 @@ export async function createOperator(
   emailRaw: unknown,
   passwordRaw: unknown,
   roleRaw: unknown,
-): Promise<{ ok: true; user: PublicUser } | { ok: false; error: "forbidden" | "invalid" | "exists" }> {
+): Promise<{ ok: true; user: PublicUser } | { ok: false; error: "forbidden" | "invalid_email" | "invalid_password" | "invalid_role" | "exists" }> {
   if (actor.role !== "superadmin") return { ok: false, error: "forbidden" };
   const email = parseEmail(emailRaw);
   const password = parsePassword(passwordRaw);
   const role: OpsRole = roleRaw === "superadmin" ? "superadmin" : roleRaw === "admin" ? "admin" : "admin";
-  if (!email || !password) return { ok: false, error: "invalid" };
-  if (roleRaw != null && roleRaw !== "admin" && roleRaw !== "superadmin") return { ok: false, error: "invalid" };
+  if (!email) return { ok: false, error: "invalid_email" };
+  if (!password) return { ok: false, error: "invalid_password" };
+  if (roleRaw != null && roleRaw !== "admin" && roleRaw !== "superadmin") return { ok: false, error: "invalid_role" };
 
   const db = drizzle(env.DB, { schema });
   const existing = (await db.select({ id: schema.opsUsers.id }).from(schema.opsUsers).where(eq(schema.opsUsers.email, email)))[0];

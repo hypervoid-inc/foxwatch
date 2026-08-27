@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./api.ts";
 import { CheckForm, type Monitor } from "./CheckForm.tsx";
-import { mutationError, outcomeLabel, outcomeMark, regionLabel, regionTitle } from "./labels.ts";
+import { outcomeLabel, outcomeMark, regionLabel, regionTitle } from "./labels.ts";
 import { CopyPanel, ConfirmDialog, ErrorText, Field, Mark } from "./ui.tsx";
 
 type Latest = {
@@ -39,7 +39,7 @@ export function Checks({
     const res = await api<{ ok: boolean; skipped?: string }>(`/api/ops/monitors/${id}/run`, { method: "POST", body: "{}" });
     setBusy(null);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not run that check."));
+      setError(res.error);
       return;
     }
     if (res.data.skipped === "muted") {
@@ -59,7 +59,7 @@ export function Checks({
     const res = await api(`/api/ops/monitors/${id}/mute`, { method: "POST", body: JSON.stringify({ until }) });
     setBusy(null);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not update mute."));
+      setError(res.error);
       return;
     }
     await onChange();
@@ -72,7 +72,7 @@ export function Checks({
     setBusy(null);
     setPendingDelete(null);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not delete that check."));
+      setError(res.error);
       return;
     }
     setSelected(null);
@@ -85,7 +85,7 @@ export function Checks({
     const res = await api<{ token: string; curl: string }>(`/api/ops/heartbeats/${id}/rotate`, { method: "POST", body: "{}" });
     setBusy(null);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not rotate that token."));
+      setError(res.error);
       return;
     }
     setCurl({ id, value: res.data.curl });
@@ -363,7 +363,7 @@ function MaintenanceCard({
     });
     setPending(false);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not start maintenance."));
+      setError(res.error);
       return;
     }
     setWindows((current) => [...current, res.data.window].sort((a, b) => a.startAt - b.startAt));
@@ -379,7 +379,7 @@ function MaintenanceCard({
     const res = await api(`/api/ops/components/${componentId}/maintenance/${windowId}`, { method: "DELETE" });
     setPending(false);
     if (!res.ok) {
-      setError(mutationError(res.error, "Could not end maintenance."));
+      setError(res.error);
       return;
     }
     setWindows((current) => current.filter((window) => window.id !== windowId));
