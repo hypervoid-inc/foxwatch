@@ -11,6 +11,23 @@ const DEFAULT_REGIONS = ["wnam", "weur", "apac"];
 const REGION_IDS = ["wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me"] as const;
 const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
 
+const ASSERTION_OPS = [
+  { value: "exists", label: "Exists" },
+  { value: "not_exists", label: "Does not exist" },
+  { value: "equals", label: "Equals" },
+  { value: "not_equals", label: "Not equals" },
+  { value: "gt", label: ">" },
+  { value: "gte", label: ">=" },
+  { value: "lt", label: "<" },
+  { value: "lte", label: "<=" },
+  { value: "contains", label: "Contains" },
+  { value: "not_contains", label: "Does not contain" },
+  { value: "matches", label: "Matches (wildcard)" },
+] as const;
+
+type AssertionOp = (typeof ASSERTION_OPS)[number]["value"];
+type AssertionRow = { path: string; op: AssertionOp; value: string };
+
 export type SecretRef = { __foxwatch_secret__: string };
 
 export type HttpConfig = {
@@ -19,7 +36,13 @@ export type HttpConfig = {
   method?: string;
   headers?: Record<string, string | SecretRef>;
   body?: string;
-  expect?: { status?: number | number[]; bodyIncludes?: string };
+  expect?: {
+    status?: number | number[];
+    bodyIncludes?: string;
+    jsonPath?: { path: string; equals?: string | number | boolean; exists?: boolean };
+    assertions?: Array<{ path: string; op: string; value?: string | number | boolean | null }>;
+    assertionFailThreshold?: number;
+  };
   intervalMs?: number;
   timeoutMs?: number;
   graceMs?: number;
@@ -117,6 +140,8 @@ type CheckFormState = {
   body: string;
   expectStatus: string;
   bodyIncludes: string;
+  assertions: AssertionRow[];
+  assertionFailThreshold: number;
   interval: string;
   timeout: string;
   grace: string;
@@ -142,6 +167,8 @@ function emptyForm(): CheckFormState {
     body: "",
     expectStatus: "200",
     bodyIncludes: "",
+    assertions: [],
+    assertionFailThreshold: 1,
     interval: "1m",
     timeout: "10s",
     grace: "2m",
@@ -162,6 +189,22 @@ function formFromMonitor(m: Monitor): CheckFormState {
   const cfg = m.config;
   const expect = cfg.expect ?? {};
   const status = Array.isArray(expect.status) ? expect.status.join(", ") : expect.status;
+  // Load assertions, converting legacy jsonPath if present
+  let assertions: AssertionRow[] = [];
+  if (expect.assertions?.length) {
+    assertions = expect.assertions.map((a) => ({
+      path: a.path,
+      op: a.op as AssertionOp,
+      value: a.value == null ? "" : String(a.value),
+    }));
+  } else if (expect.jsonPath) {
+    const jp = expect.jsonPath;
+    if (jp.exists) {
+      assertions = [{ path: jp.path, op: "exists", value: "" }];
+    } else if (jp.equals !== undefined) {
+      assertions = [{ path: jp.path, op: "equals", value: String(jp.equals) }];
+    }
+  }
   return {
     checkType: m.type === "heartbeat" ? "heartbeat" : "http",
     name: m.name,
@@ -171,6 +214,8 @@ function formFromMonitor(m: Monitor): CheckFormState {
     body: String(cfg.body ?? ""),
     expectStatus: String(status ?? 200),
     bodyIncludes: String(expect.bodyIncludes ?? ""),
+    assertions,
+    assertionFailThreshold: expect.assertionFailThreshold ?? 1,
     interval: intervalFromMs(cfg.intervalMs),
     timeout: timeoutFromMs(cfg.timeoutMs),
     grace: graceFromMs(cfg.graceMs),
@@ -194,6 +239,7 @@ function usesAdvanced(form: CheckFormState): boolean {
     hasHeaders ||
     Boolean(form.body.trim()) ||
     Boolean(form.bodyIncludes.trim()) ||
+    form.assertions.length > 0 ||
     form.timeout !== "10s" ||
     form.retries !== 2 ||
     !form.followRedirects ||
@@ -370,6 +416,25 @@ export function CheckForm({
       }
       const allowedHosts = [...new Set(form.allowedHosts.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))];
       if (!allowedHosts.includes(url.hostname.toLowerCase())) allowedHosts.unshift(url.hostname.toLowerCase());
+      // Build assertions payload
+      const validAssertions = form.assertions
+        .filter((a) => a.path.trim())
+        .map((a) => {
+          const base: { path: string; op: string; value?: string | number | boolean | null } = { path: a.path.trim(), op: a.op };
+          if (a.op === "exists" || a.op === "not_exists") return base;
+          // Try to parse as number or boolean
+          const v = a.value.trim();
+          if (v === "true") base.value = true;
+          else if (v === "false") base.value = false;
+          else if (v === "null") base.value = null;
+          else if (v !== "" && Number.isFinite(Number(v))) base.value = Number(v);
+          else base.value = v;
+          return base;
+        });
+      if (validAssertions.length > 20) {
+        setError("Maximum 20 assertions per check.");
+        return;
+      }
       payload = {
         ...(editing?.config ?? {}),
         ...shared,
@@ -388,9 +453,10 @@ export function CheckForm({
         confirmFails: form.confirmFails,
         degradedIf: latencyThreshold ? { latencyMs: latencyThreshold } : undefined,
         expect: {
-          ...(editing?.config.expect ?? {}),
           status: expectedStatuses.length === 1 ? expectedStatuses[0] : expectedStatuses,
           bodyIncludes: form.bodyIncludes.trim() || undefined,
+          assertions: validAssertions.length ? validAssertions : undefined,
+          assertionFailThreshold: validAssertions.length > 1 ? form.assertionFailThreshold : undefined,
         },
       };
     }
@@ -716,6 +782,70 @@ export function CheckForm({
                   </span>
                   <input id="check-includes" className="check-plain" value={form.bodyIncludes} onChange={(e) => set("bodyIncludes", e.target.value)} placeholder='e.g. "ok"' />
                 </label>
+                <div className="check-assertions">
+                  <span className="check-row-k">
+                    Assertions
+                    <InfoTip>JSON path assertions on the response body. Use $.key.nested[0] syntax. Wildcard matching uses * and ? characters.</InfoTip>
+                  </span>
+                  {form.assertions.map((row, i) => (
+                    <div key={i} className="check-assertion-row">
+                      <input
+                        className="check-assertion-path"
+                        placeholder="$.data.status"
+                        value={row.path}
+                        onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, path: e.target.value } : a))}
+                        aria-label="JSON path"
+                      />
+                      <select
+                        className="check-assertion-op"
+                        value={row.op}
+                        onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, op: e.target.value as AssertionOp } : a))}
+                        aria-label="Operator"
+                      >
+                        {ASSERTION_OPS.map((op) => (
+                          <option key={op.value} value={op.value}>{op.label}</option>
+                        ))}
+                      </select>
+                      {row.op !== "exists" && row.op !== "not_exists" ? (
+                        <input
+                          className="check-assertion-val"
+                          placeholder={row.op === "contains" || row.op === "not_contains" ? "substring" : row.op === "matches" ? "pattern*" : "value"}
+                          value={row.value}
+                          onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, value: e.target.value } : a))}
+                          aria-label="Expected value"
+                        />
+                      ) : null}
+                      <button
+                        type="button"
+                        className="check-assertion-rm"
+                        onClick={() => set("assertions", form.assertions.filter((_, j) => j !== i))}
+                        aria-label="Remove assertion"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" className="check-assertion-add" onClick={() => set("assertions", [...form.assertions, { path: "", op: "exists" as AssertionOp, value: "" }])}>
+                    + Add assertion
+                  </button>
+                  {form.assertions.length > 1 ? (
+                    <label className="check-row check-assertion-threshold" htmlFor="check-assert-threshold">
+                      <span className="check-row-k">
+                        Fail threshold
+                        <InfoTip>Number of assertions that must fail before the check is marked as failed.</InfoTip>
+                      </span>
+                      <input
+                        id="check-assert-threshold"
+                        className="check-plain check-plain-num"
+                        type="number"
+                        min={1}
+                        max={form.assertions.length}
+                        value={form.assertionFailThreshold}
+                        onChange={(e) => set("assertionFailThreshold", Math.max(1, Math.min(form.assertions.length, Number(e.target.value) || 1)))}
+                      />
+                    </label>
+                  ) : null}
+                </div>
                 <label className="check-row" htmlFor="check-redirects">
                   <span className="check-row-k check-row-k-wide">
                     Redirects

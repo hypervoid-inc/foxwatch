@@ -7,9 +7,12 @@ import {
   MIN_INTERVAL_MS,
   MAX_TIMEOUT_MS,
   MAX_REGIONS,
+  MAX_ASSERTIONS,
   REGIONS,
+  ASSERTION_OPS,
   type Check,
   type HttpCheck,
+  type Assertion,
   http,
   heartbeat,
   secretName,
@@ -932,6 +935,30 @@ function parseCheckInput(body: Record<string, unknown>): Check {
   if (expect.jsonPath != null) {
     const assertion = expect.jsonPath as Record<string, unknown>;
     if (!assertion || typeof assertion !== "object" || typeof assertion.path !== "string" || assertion.path.length > 256) throw new Error("expect");
+  }
+  if (expect.assertions != null) {
+    if (!Array.isArray(expect.assertions) || expect.assertions.length > MAX_ASSERTIONS) throw new Error("expect");
+    for (const a of expect.assertions as unknown[]) {
+      if (!a || typeof a !== "object" || Array.isArray(a)) throw new Error("expect");
+      const item = a as Record<string, unknown>;
+      if (typeof item.path !== "string" || item.path.length > 256 || !item.path.startsWith("$")) throw new Error("expect");
+      if (typeof item.op !== "string" || !(ASSERTION_OPS as readonly string[]).includes(item.op)) throw new Error("expect");
+      const op = item.op as Assertion["op"];
+      if (op === "exists" || op === "not_exists") {
+        // value not needed
+      } else if (op === "gt" || op === "gte" || op === "lt" || op === "lte") {
+        if (typeof item.value !== "number" || !Number.isFinite(item.value)) throw new Error("expect");
+      } else if (op === "contains" || op === "not_contains" || op === "matches") {
+        if (typeof item.value !== "string" || item.value.length > 256) throw new Error("expect");
+      } else {
+        // equals / not_equals: allow string, number, boolean, null
+        if (item.value !== null && typeof item.value !== "string" && typeof item.value !== "number" && typeof item.value !== "boolean") throw new Error("expect");
+      }
+    }
+    if (expect.assertionFailThreshold != null) {
+      const t = Number(expect.assertionFailThreshold);
+      if (!Number.isInteger(t) || t < 1 || t > (expect.assertions as unknown[]).length) throw new Error("expect");
+    }
   }
   const ch = http(id, {
     url: String(body.url),

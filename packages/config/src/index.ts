@@ -57,11 +57,38 @@ export function secretName(value: unknown): string | null {
   return isSecretRef(value) ? value[SECRET_REF] : null;
 }
 
+export const ASSERTION_OPS = [
+  "exists",
+  "not_exists",
+  "equals",
+  "not_equals",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "contains",
+  "not_contains",
+  "matches",
+] as const;
+
+export type AssertionOp = (typeof ASSERTION_OPS)[number];
+
+export type Assertion = {
+  path: string;
+  op: AssertionOp;
+  value?: string | number | boolean | null;
+};
+
+export const MAX_ASSERTIONS = 20;
+
 export type HttpExpect = {
   status?: number | number[];
   header?: Record<string, string>;
   bodyIncludes?: string;
+  /** @deprecated Use assertions[] instead */
   jsonPath?: { path: string; equals?: string | number | boolean; exists?: boolean };
+  assertions?: Assertion[];
+  assertionFailThreshold?: number;
 };
 
 export type HttpCheck = {
