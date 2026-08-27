@@ -191,7 +191,9 @@ export function OpsApp() {
       setError(
         res.error === "exists"
           ? "An account already exists. Sign in instead."
-          : "Use a valid email and a password of at least 12 characters.",
+          : res.status >= 500
+            ? "Could not create the account. Try again."
+            : "Use a valid email and a password of at least 12 characters.",
       );
       if (res.status === 409) setGate("login");
       return;

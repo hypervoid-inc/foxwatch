@@ -1,6 +1,7 @@
 import { tokenEquals } from "../lib/crypto.ts";
 
-export const PBKDF2_ITERATIONS = 210_000;
+// Production Workers still throw above 100k PBKDF2 iterations (workerd DoS cap).
+export const PBKDF2_ITERATIONS = 100_000;
 const HASH_PREFIX = "pbkdf2-sha256";
 
 function bytesToHex(bytes: Uint8Array): string {

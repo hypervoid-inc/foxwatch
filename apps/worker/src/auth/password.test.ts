@@ -4,6 +4,7 @@ import { dummyPasswordHash, hashPassword, parseEmail, parsePassword, verifyPassw
 describe("parseEmail", () => {
   it("normalizes and rejects junk", () => {
     expect(parseEmail("  Admin@Example.COM ")).toBe("admin@example.com");
+    expect(parseEmail("ankush@construct.computer")).toBe("ankush@construct.computer");
     expect(parseEmail("not-an-email")).toBeNull();
     expect(parseEmail("")).toBeNull();
     expect(parseEmail("a@b")).toBeNull();
@@ -21,7 +22,7 @@ describe("parsePassword", () => {
 describe("hashPassword", () => {
   it("verifies the same password and rejects another", async () => {
     const stored = await hashPassword("correct-horse-battery");
-    expect(stored.startsWith("pbkdf2-sha256$")).toBe(true);
+    expect(stored.startsWith("pbkdf2-sha256$100000$")).toBe(true);
     expect(await verifyPassword("correct-horse-battery", stored)).toBe(true);
     expect(await verifyPassword("wrong-password-xx", stored)).toBe(false);
     expect(await verifyPassword("correct-horse-battery", "not-a-hash")).toBe(false);
