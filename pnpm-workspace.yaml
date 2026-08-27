@@ -2,3 +2,9 @@ packages:
   - "packages/*"
 
 trustPolicy: any
+
+# esbuild and workerd download native binaries in postinstall.
+# pnpm 11 fails CI with ERR_PNPM_IGNORED_BUILDS unless these are allowed.
+allowBuilds:
+  esbuild: true
+  workerd: true
