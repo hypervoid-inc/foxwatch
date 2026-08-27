@@ -2,6 +2,7 @@
 export function isWorkerPath(pathname: string): boolean {
   return (
     pathname === "/" ||
+    pathname === "/history" ||
     pathname === "/badge.svg" ||
     pathname === "/feed.xml" ||
     pathname === "/icon" ||

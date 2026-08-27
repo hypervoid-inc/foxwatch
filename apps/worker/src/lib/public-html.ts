@@ -327,7 +327,7 @@ function renderService(group: PublicSnapshot["groups"][number]): string {
 
 function renderTimeline(incident: PublicIncident): string {
   const items = incident.updates.length
-    ? incident.updates
+    ? [...incident.updates].reverse()
     : [{ status: incident.status, body: "", at: incident.startedAt }];
   return `<ol class="timeline">${items
     .map(
@@ -337,8 +337,30 @@ function renderTimeline(incident: PublicIncident): string {
     .join("")}</ol>`;
 }
 
-function renderIncidents(incidents: PublicIncident[]): string {
-  if (!incidents.length) return `<p class="quiet">No incidents reported.</p>`;
+function incidentDuration(incident: PublicIncident): string {
+  if (!incident.resolvedAt) return "";
+  const ms = incident.resolvedAt - incident.startedAt;
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.round((ms % 3_600_000) / 60_000);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function renderIncidentArticle(i: PublicIncident): string {
+  const statusBadge = `<span class="badge badge-${escapeHtml(i.status)}">${escapeHtml(incidentStatusLabel(i.status))}</span>`;
+  const impactBadge = `<span class="badge badge-${escapeHtml(i.impact)}">${escapeHtml(impactLabel(i.impact))}</span>`;
+  const duration = i.resolvedAt ? `<p class="incident-duration">Duration: ${escapeHtml(incidentDuration(i))}</p>` : "";
+  const components = i.componentNames?.length ? `<span class="badge badge-monitoring">${escapeHtml(i.componentNames.join(", "))}</span>` : "";
+  return `<article class="incident" id="incident-${escapeHtml(i.id)}">
+    <div class="incident-header"><h3>${escapeHtml(i.title)}</h3></div>
+    <div class="incident-badges">${statusBadge}${impactBadge}${components}</div>
+    ${duration}
+    ${renderTimeline(i)}
+  </article>`;
+}
+
+function renderIncidentsByDay(incidents: PublicIncident[]): string {
   const byDay = new Map<string, PublicIncident[]>();
   for (const incident of incidents) {
     const key = utcDayKey(incident.startedAt);
@@ -349,18 +371,38 @@ function renderIncidents(incidents: PublicIncident[]): string {
   return [...byDay.entries()]
     .sort(([a], [b]) => b.localeCompare(a))
     .map(([day, dayIncidents]) => {
-      const articles = dayIncidents
-        .map(
-          (i) => `<article class="incident" id="incident-${escapeHtml(i.id)}">
-            <h3>${escapeHtml(i.title)}</h3>
-            <p class="meta">${escapeHtml(incidentStatusLabel(i.status))} · ${escapeHtml(impactLabel(i.impact))}${i.componentNames?.length ? ` · ${escapeHtml(i.componentNames.join(", "))}` : ""}</p>
-            ${renderTimeline(i)}
-          </article>`,
-        )
-        .join("");
+      const articles = dayIncidents.map(renderIncidentArticle).join("");
       return `<div class="incident-day"><p class="incident-date">${escapeHtml(formatDayHeading(day))}</p>${articles}</div>`;
     })
     .join("");
+}
+
+function renderIncidents(incidents: PublicIncident[]): string {
+  if (!incidents.length) return `<p class="quiet">No incidents reported.</p>`;
+  return renderIncidentsByDay(incidents);
+}
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function renderTodayIncidents(incidents: PublicIncident[]): string {
+  const today = todayKey();
+  const todayIncidents = incidents.filter((i) => {
+    // Show incidents that are active (unresolved) or started today
+    if (!i.resolvedAt) return true;
+    return utcDayKey(i.startedAt) === today || utcDayKey(i.resolvedAt) === today;
+  });
+  if (!todayIncidents.length) return `<p class="quiet">No incidents today.</p>`;
+  return renderIncidentsByDay(todayIncidents);
+}
+
+function hasOlderIncidents(incidents: PublicIncident[]): boolean {
+  const today = todayKey();
+  return incidents.some((i) => {
+    if (!i.resolvedAt) return false;
+    return utcDayKey(i.startedAt) !== today && utcDayKey(i.resolvedAt) !== today;
+  });
 }
 
 const STYLES = `
@@ -613,7 +655,7 @@ details[open] .chev { transform: rotate(180deg); }
   transform: translateX(-50%) translateY(4px);
   background: var(--card); color: var(--muted);
   border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem 0.65rem;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 12%, transparent); white-space: nowrap; min-width: 13.5rem;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.2); white-space: nowrap; min-width: 13.5rem;
   transition: opacity var(--duration-ui) var(--ease-out), transform var(--duration-ui) var(--ease-out), visibility var(--duration-ui) var(--ease-out);
 }
 .bar:hover .tip { transition-duration: 0ms; }
@@ -663,7 +705,7 @@ details[open] ~ .group-bar { display: none; }
 .incident-day { border-top: 1px solid var(--line); }
 .incident-date { margin: 0; padding: 0.85rem 1.15rem 0.25rem; color: var(--muted); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; }
 .incident { padding: 0.55rem 1.15rem 1rem; }
-.incident h3 { margin: 0 0 0.2rem; font-size: 0.95rem; letter-spacing: -0.01em; }
+.incident h3 { margin: 0; font-size: 0.95rem; letter-spacing: -0.01em; }
 .incident .meta { margin: 0 0 0.55rem; color: var(--muted); font-size: 0.8rem; }
 .timeline { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.55rem; }
 .timeline-item { border-left: 2px solid var(--line); padding: 0 0 0 0.75rem; background: none; }
@@ -673,6 +715,38 @@ details[open] ~ .group-bar { display: none; }
 .update-meta { margin: 0 0 0.15rem; color: var(--muted); font-size: 0.75rem; }
 .update-body { margin: 0; font-size: 0.875rem; }
 .quiet { margin: 0; padding: 0.85rem 1.15rem 1.1rem; color: var(--muted); font-size: 0.875rem; }
+.history-link {
+  display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+  margin: 0; padding: 0.75rem 1.15rem; border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 0.8125rem; font-weight: 500; text-decoration: none;
+  transition: background var(--duration-ui) var(--ease-out), color var(--duration-ui) var(--ease-out);
+}
+.history-link:hover { background: var(--hover); color: var(--ink); }
+.history-link svg { width: 0.75rem; height: 0.75rem; flex: none; }
+.badge {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.01em;
+  padding: 0.15rem 0.45rem; border-radius: 4px; line-height: 1.4;
+  text-transform: uppercase; white-space: nowrap;
+}
+.badge-investigating { background: var(--warn-bg); color: var(--warn-ink); }
+.badge-identified { background: var(--warn-bg); color: var(--warn-ink); }
+.badge-monitoring { background: var(--ok-bg); color: var(--ok-ink); }
+.badge-resolved { background: var(--ok-bg); color: var(--ok-ink); }
+.badge-degraded { background: var(--warn-bg); color: var(--warn-ink); }
+.badge-failing { background: var(--bad-bg); color: var(--bad-ink); }
+.incident-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.3rem; }
+.incident-header h3 { margin: 0; font-size: 0.95rem; letter-spacing: -0.01em; }
+.incident-badges { display: flex; align-items: center; gap: 0.35rem; margin: 0.3rem 0 0.45rem; flex-wrap: wrap; }
+.incident-duration { color: var(--muted); font-size: 0.75rem; margin: 0 0 0.55rem; }
+.back-link {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  color: var(--muted); font-size: 0.8125rem; font-weight: 500; text-decoration: none;
+  margin-bottom: 1rem;
+  transition: color var(--duration-ui) var(--ease-out);
+}
+.back-link:hover { color: var(--ink); }
+.back-link svg { width: 0.75rem; height: 0.75rem; flex: none; }
 .foot { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: auto; flex: none; }
 .foot .by { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 500; color: var(--ink); margin: 0 0 0.5rem; text-decoration: none; }
 .disclaimer { margin: 0 auto; max-width: 32rem; line-height: 1.55; }
@@ -728,9 +802,13 @@ export function renderSystemsBlock(snap: PublicSnapshot): string {
 }
 
 export function renderHistoryBlock(snap: PublicSnapshot): string {
+  const historyLink = hasOlderIncidents(snap.incidents)
+    ? `<a class="history-link" href="/history">View full incident history<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></a>`
+    : "";
   return `<section class="card" id="live-history" aria-labelledby="history-title">
         <div class="card-head"><h2 id="history-title">Incident history</h2></div>
-        ${renderIncidents(snap.incidents)}
+        ${renderTodayIncidents(snap.incidents)}
+        ${historyLink}
       </section>`;
 }
 
@@ -976,10 +1054,45 @@ export function renderPublicHtml(snap: PublicSnapshot): string {
     </main>
     <footer class="foot">
       <p><a class="by" href="https://github.com/hypervoid-inc/foxwatch" target="_blank" rel="noopener noreferrer">${FOOT_FOX}Powered by Foxwatch</a></p>
-      <p class="disclaimer">Availability is measured from Cloudflare’s edge. Figures are aggregated across regions and checks; individual experience may vary by path and location.</p>
+      <p class="disclaimer">Availability is measured from Cloudflare's edge. Figures are aggregated across regions and checks; individual experience may vary by path and location.</p>
     </footer>
   </div>
   <script>${LIVE_CLIENT_SCRIPT}</script>
+</body>
+</html>`;
+}
+
+export function renderHistoryPage(snap: PublicSnapshot): string {
+  return `<!doctype html>
+<html lang="en" data-banner="${escapeHtml(snap.banner)}">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="theme-color" content="#efece6"/>
+  <title>Incident history — ${escapeHtml(snap.siteName)}</title>
+  <meta name="description" content="Full incident history for ${escapeHtml(snap.siteName)}"/>
+  <link rel="icon" href="${pageIcon(snap)}"/>
+  <script>${THEME_BOOT}</script>
+  <style>${STYLES}</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      ${renderBrandBlock(snap)}
+      ${THEME_TOGGLE}
+    </header>
+    <main>
+      <a class="back-link" href="/"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M7.5 2.5 4 6l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Back to status</a>
+      <section class="card" aria-labelledby="history-title">
+        <div class="card-head"><h2 id="history-title">Incident history</h2></div>
+        ${renderIncidents(snap.incidents)}
+      </section>
+    </main>
+    <footer class="foot">
+      <p><a class="by" href="https://github.com/hypervoid-inc/foxwatch" target="_blank" rel="noopener noreferrer">${FOOT_FOX}Powered by Foxwatch</a></p>
+      <p class="disclaimer">Availability is measured from Cloudflare's edge. Figures are aggregated across regions and checks; individual experience may vary by path and location.</p>
+    </footer>
+  </div>
 </body>
 </html>`;
 }

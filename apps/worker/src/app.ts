@@ -20,7 +20,7 @@ import { allowHttpLocal, envSecret } from "./env.ts";
 import * as schema from "./db/schema.ts";
 import { authorizeOps, clearOpsCookie, csrfOk, isOpenOpsPath, opsCookie, sessionTokenFromRequest, type OpsRole } from "./auth/ops.ts";
 import { readSnapshot, publishSnapshot, loadSettings, saveSettings, rememberSecretNames, loadIcon, saveIcon, deleteIcon } from "./lib/snapshot.ts";
-import { renderBadge, renderFeed, renderLivePayload, renderPublicHtml } from "./lib/public-html.ts";
+import { renderBadge, renderFeed, renderHistoryPage, renderLivePayload, renderPublicHtml } from "./lib/public-html.ts";
 import { sha256Hex, randomToken, newId } from "./lib/crypto.ts";
 import { auditPageFromRows, parseAuditCursor, parseAuditLimit } from "./lib/audit-page.ts";
 import { monitorStub } from "./do/monitor.ts";
@@ -71,6 +71,11 @@ app.use("*", async (c, next) => {
 app.get("/", async (c) => {
   const snap = await readSnapshot(c.env);
   return c.html(renderPublicHtml(snap), 200, PUBLIC_HEADERS);
+});
+
+app.get("/history", async (c) => {
+  const snap = await readSnapshot(c.env);
+  return c.html(renderHistoryPage(snap), 200, PUBLIC_HEADERS);
 });
 
 app.get("/api/status.json", async (c) => {
