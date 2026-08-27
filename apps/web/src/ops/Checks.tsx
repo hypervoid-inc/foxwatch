@@ -406,12 +406,14 @@ function MaintenanceCard({
           <Field label="Note (optional)" htmlFor="maint-note">
             <input id="maint-note" className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Deploying API v2" />
           </Field>
-          <Field label="Start" htmlFor="maint-start">
-            <input id="maint-start" className="input" type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} required />
-          </Field>
-          <Field label="End" htmlFor="maint-end">
-            <input id="maint-end" className="input" type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} required />
-          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Start" htmlFor="maint-start">
+              <input id="maint-start" className="input" type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} required />
+            </Field>
+            <Field label="End" htmlFor="maint-end">
+              <input id="maint-end" className="input" type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} required />
+            </Field>
+          </div>
           <button className="btn btn-primary w-fit" disabled={pending} type="submit">
             {pending ? "Scheduling…" : "Schedule maintenance"}
           </button>
