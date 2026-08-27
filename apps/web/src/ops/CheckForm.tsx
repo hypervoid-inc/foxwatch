@@ -232,26 +232,6 @@ function formFromMonitor(m: Monitor): CheckFormState {
   };
 }
 
-function usesAdvanced(form: CheckFormState): boolean {
-  const hasHeaders = form.headers.some((h) => h.key.trim() && h.value.trim());
-  const customComponent = Boolean(form.componentName.trim()) && form.componentName.trim() !== form.name.trim();
-  return (
-    hasHeaders ||
-    Boolean(form.body.trim()) ||
-    Boolean(form.bodyIncludes.trim()) ||
-    form.assertions.length > 0 ||
-    form.timeout !== "10s" ||
-    form.retries !== 2 ||
-    !form.followRedirects ||
-    form.failWhen !== "majority" ||
-    form.confirmFails !== 3 ||
-    Boolean(form.latencyThreshold) ||
-    Boolean(form.allowedHosts.trim()) ||
-    customComponent ||
-    form.critical
-  );
-}
-
 type TestResult = {
   outcome: string;
   latencyMs: number | null;

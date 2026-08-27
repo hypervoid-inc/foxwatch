@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api.ts";
 import { impactLabel, incidentStatusLabel, mutationError } from "./labels.ts";
-import { ErrorText, Field, InfoTip, Mark, Timeline, useActionFlash } from "./ui.tsx";
+import { ErrorText, Field, Mark, Timeline, useActionFlash } from "./ui.tsx";
 
 export type Incident = {
   id: string;

@@ -564,7 +564,7 @@ function Operators({ me }: { me: Me }) {
         <ul className="check-sheet">
           {users.map((u) => (
             <li key={u.id} className="check-row">
-              <span className="operator-avatar">{u.email[0].toUpperCase()}</span>
+              <span className="operator-avatar">{u.email.charAt(0).toUpperCase()}</span>
               <span className="set-op-email">{u.email}</span>
               <span className="set-op-role">{u.role}</span>
               {u.id !== me.id ? (
