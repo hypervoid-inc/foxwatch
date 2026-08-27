@@ -19,6 +19,19 @@
     "preinstall": "node -e \"const a=process.env.npm_config_user_agent||''; if(!a.includes('pnpm')){console.error('Foxwatch uses pnpm workspaces. Install pnpm: https://pnpm.io/installation'); process.exit(1)}\"",
     "foxwatch": "node scripts/cli.mjs"
   },
+  "cloudflare": {
+    "bindings": {
+      "DB": {
+        "description": "D1 for checks, incidents, and operator accounts. Keep the name `foxwatch-data`."
+      },
+      "STATUS": {
+        "description": "KV for the public status snapshot. On the Deploy to Cloudflare setup page, name it `foxwatch-status`."
+      },
+      "ALERTS": {
+        "description": "Queue for Slack, Discord, and webhook alerts (`foxwatch-alerts`)."
+      }
+    }
+  },
   "dependencies": {
     "@foxwatch/config": "workspace:*",
     "@foxwatch/engine": "workspace:*",

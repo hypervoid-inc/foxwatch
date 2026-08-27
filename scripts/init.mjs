@@ -1,22 +1,23 @@
 #!/usr/bin/env node
 /**
  * Creates D1, KV, and Queue on *your* Cloudflare account.
- * IDs go to gitignored wrangler.cloud.jsonc. wrangler.jsonc stays placeholders.
+ * IDs go to gitignored wrangler.cloud.jsonc. wrangler.jsonc stays empty.
  */
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { writeCloudIds, cloudWranglerPath } from "./cloud-ids.mjs";
+import { writeCloudIds, cloudWranglerPath, d1DatabaseName, KV_NAMESPACE_TITLE, alertsQueueName } from "./cloud-ids.mjs";
 import { parseJsonBlob, runWrangler } from "./run.mjs";
 
-const DB_NAME = "foxwatch";
-const KV_TITLE = "STATUS";
-const QUEUE_NAME = "foxwatch-alerts";
+const DB_NAME = d1DatabaseName();
+const KV_TITLE = KV_NAMESPACE_TITLE;
+const QUEUE_NAME = alertsQueueName();
 const YES = process.argv.includes("--yes");
 
 /** Tables Foxwatch owns. sqlite_* / d1_migrations are ignored. */
 const FOXWATCH_TABLES = new Set([
   "monitors",
   "check_latest",
+  "check_runs",
   "component_state",
   "daily_uptime",
   "incidents",
@@ -31,6 +32,12 @@ const FOXWATCH_TABLES = new Set([
   "ops_sessions",
   "ops_auth_throttle",
 ]);
+
+const IN_CI = Boolean(process.env.GITHUB_ACTIONS);
+
+function showId(id) {
+  return IN_CI ? "(omitted in CI logs)" : id;
+}
 
 function ignoreTable(name) {
   return name.startsWith("sqlite_") || name === "d1_migrations" || name.startsWith("_cf_");
@@ -118,7 +125,7 @@ function d1Tables(databaseId) {
 function printDb(db) {
   const extra = db.num_tables != null ? `, ${db.num_tables} table(s)` : "";
   console.log(`  name: ${db.name}`);
-  console.log(`  id:   ${db.uuid ?? db.id}${extra}`);
+  console.log(`  id:   ${showId(db.uuid ?? db.id)}${extra}`);
 }
 
 async function ensureD1() {
@@ -131,7 +138,7 @@ async function ensureD1() {
       console.error(out);
       process.exit(1);
     }
-    console.log(`Created D1 ${DB_NAME} (${id})`);
+    console.log(`Created D1 ${DB_NAME} (${showId(id)})`);
     return id;
   }
 
@@ -173,7 +180,7 @@ async function ensureD1() {
 
 async function ensureKv() {
   const rows = listKv();
-  const found = rows.find((r) => r.title === KV_TITLE || r.title === `${DB_NAME}-${KV_TITLE}`);
+  const found = rows.find((r) => r.title === KV_TITLE);
   if (!found) {
     console.log(`Creating KV namespace ${KV_TITLE}…`);
     const out = runWrangler(["kv", "namespace", "create", KV_TITLE]);
@@ -182,13 +189,13 @@ async function ensureKv() {
       console.error(out);
       process.exit(1);
     }
-    console.log(`Created KV ${KV_TITLE} (${id})`);
+    console.log(`Created KV ${KV_TITLE} (${showId(id)})`);
     return id;
   }
 
   console.log(`KV namespace already exists:`);
   console.log(`  title: ${found.title}`);
-  console.log(`  id:    ${found.id}`);
+  console.log(`  id:    ${showId(found.id)}`);
   if (!(await confirm("Use this existing KV namespace for Foxwatch status snapshots?"))) {
     console.error("Aborted. Create a differently titled namespace or delete this one, then retry.");
     process.exit(1);
@@ -230,8 +237,11 @@ function applyMigrations() {
 async function main() {
   try {
     process.stdout.write(runWrangler(["whoami"]));
-  } catch {
-    console.error("Not logged in to Cloudflare. Run:\n  pnpm exec wrangler login\nthen retry pnpm foxwatch init");
+  } catch (err) {
+    console.error(err.output ?? err.message);
+    console.error(
+      "Not logged in to Cloudflare. Run `pnpm exec wrangler login`, or in CI set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.",
+    );
     process.exit(1);
   }
 

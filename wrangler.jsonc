@@ -1,6 +1,7 @@
 {
-  // Placeholders only. Real D1/KV IDs live in gitignored wrangler.cloud.jsonc
-  // (`pnpm foxwatch init`, passed to wrangler via --config).
+  // D1/KV IDs are omitted on purpose. This template must not contain account IDs.
+  // Wrangler and the Deploy to Cloudflare button provision them. GitHub Actions
+  // injects IDs from secrets into the build output, not this file.
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "foxwatch",
   "main": "./apps/worker/src/index.ts",
@@ -23,15 +24,13 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "foxwatch",
-      "database_id": "local-dev-only",
+      "database_name": "foxwatch-data",
       "migrations_dir": "migrations"
     }
   ],
   "kv_namespaces": [
     {
-      "binding": "STATUS",
-      "id": "local-dev-only"
+      "binding": "STATUS"
     }
   ],
   "analytics_engine_datasets": [
