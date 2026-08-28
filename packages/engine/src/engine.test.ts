@@ -97,8 +97,20 @@ describe("http eval", () => {
         status: 200,
         headers: {},
         body: "ok",
+        latencyMs: 10_000,
+        expect: { status: 200 },
+        timeoutMs: 10_000,
+        degradedIf: { latencyMs: 200 },
+      }).outcome,
+    ).toBe("fail");
+    expect(
+      evaluateHttp({
+        status: 200,
+        headers: {},
+        body: "ok",
         latencyMs: 900,
         expect: { status: 200 },
+        timeoutMs: 10_000,
         degradedIf: { latencyMs: 200 },
       }).outcome,
     ).toBe("degraded");

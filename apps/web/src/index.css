@@ -146,6 +146,7 @@
   --surface-hover: var(--hover);
   --duration-press: 160ms;
   --duration-ui: 150ms;
+  --duration-panel: 200ms;
 }
 
 :root,
@@ -180,6 +181,7 @@ html[data-theme="light"] {
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --duration-press: 160ms;
   --duration-ui: 150ms;
+  --duration-panel: 200ms;
 }
 
 html[data-theme="dark"] {
@@ -640,6 +642,32 @@ textarea.input-code {
 .check-plain-num {
   max-width: 4.5rem;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.check-row > .check-plain-num {
+  margin-left: auto;
+}
+
+.check-duration {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: none;
+  margin-left: auto;
+}
+
+.check-duration .check-plain-num {
+  width: 4.75rem;
+  max-width: none;
+  flex: none;
+}
+
+.check-unit {
+  width: 3.6rem;
+  flex: none;
+  cursor: pointer;
+  text-align: start;
 }
 
 .check-plain-end {
@@ -808,11 +836,41 @@ textarea.input-code {
   border-top: 1px solid var(--color-line);
 }
 
+.check-adv-cluster {
+  display: flex;
+  flex-direction: column;
+}
+
+.check-adv-label {
+  margin: 0;
+  padding: 0.55rem 0.85rem 0.15rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--color-muted);
+}
+
+.check-adv-cluster > * + * {
+  border-top: 1px solid var(--color-line);
+}
+
+.check-adv-cluster > .check-adv-label + * {
+  border-top: 0;
+}
+
+.check-adv-cluster .check-hdrs,
+.check-adv-cluster .check-assertions {
+  padding-top: 0.35rem;
+}
+
 .check-hdrs {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
   padding: 0.7rem 0.85rem 0.8rem;
+}
+
+.check-hdrs > .check-row-k {
+  margin-bottom: 0.15rem;
 }
 
 .check-hdr {
@@ -1536,12 +1594,45 @@ ul.check-sheet {
 }
 
 .advanced[open] > summary {
-  margin-bottom: 0.75rem;
   color: var(--color-ink);
 }
 
+.advanced-body,
 .advanced-inner {
   min-height: 0;
+}
+
+/* ponytail: accordion must move siblings (height), not clip-path. Ceiling: ::details-content + interpolate-size; older browsers snap. */
+@supports selector(::details-content) {
+  details::details-content {
+    interpolate-size: allow-keywords;
+    height: 0;
+    overflow: clip;
+    opacity: 0;
+    transition:
+      height var(--duration-panel) var(--ease-out),
+      opacity var(--duration-ui) var(--ease-out),
+      content-visibility var(--duration-panel) allow-discrete,
+      overflow 0s;
+  }
+
+  details[open]::details-content {
+    height: auto;
+    overflow: visible;
+    opacity: 1;
+    transition:
+      height var(--duration-panel) var(--ease-out),
+      opacity var(--duration-ui) var(--ease-out),
+      content-visibility var(--duration-panel) allow-discrete,
+      overflow 0s var(--duration-panel) allow-discrete;
+  }
+
+  @starting-style {
+    details[open]::details-content {
+      height: 0;
+      opacity: 0;
+    }
+  }
 }
 
 .empty-note {
@@ -1639,6 +1730,11 @@ ul.check-sheet {
   .advanced .chev {
     transform: none;
     transition-property: opacity, color, background-color, border-color, visibility;
+  }
+
+  details::details-content,
+  details[open]::details-content {
+    transition: opacity var(--duration-ui) var(--ease-out);
   }
 
 }

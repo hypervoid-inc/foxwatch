@@ -114,6 +114,7 @@ export type HttpEvalInput = {
   body: string;
   latencyMs: number;
   expect: HttpExpect;
+  timeoutMs?: number;
   degradedIf?: { latencyMs: number };
 };
 
@@ -179,6 +180,9 @@ export function evaluateHttp(input: HttpEvalInput): HttpEvalResult {
         reason: `${failures.length} assertion(s) failed: ${summary}`,
       };
     }
+  }
+  if (input.timeoutMs != null && input.latencyMs >= input.timeoutMs) {
+    return { outcome: "fail", errorClass: "timeout", reason: `latency ${input.latencyMs}ms` };
   }
   if (input.degradedIf && input.latencyMs > input.degradedIf.latencyMs) {
     return { outcome: "degraded", errorClass: "latency", reason: `latency ${input.latencyMs}ms` };

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import {
   defineConfig,
+  dumpConfig,
   flattenConfig,
   heartbeat,
   http,
@@ -87,6 +88,42 @@ describe("defineConfig", () => {
     expect(() =>
       defineConfig({ site: { name: "x" }, defaults: { retries: 8 }, groups: [] }),
     ).toThrow(/retries/);
+    expect(() =>
+      defineConfig({ site: { name: "x" }, defaults: { timeout: "5s", degradedIf: { latencyMs: 5000 } }, groups: [] }),
+    ).toThrow(/degrade-above must be below timeout/);
+    expect(() =>
+      defineConfig({
+        site: { name: "x" },
+        groups: [
+          {
+            id: "g",
+            name: "G",
+            components: [
+              {
+                id: "c",
+                name: "C",
+                checks: [http("a", { url: "https://example.com", timeout: "5s", degradedIf: { latencyMs: 8000 } })],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/degrade-above must be below timeout/);
+  });
+
+  it("dumps fractional-second timeouts as milliseconds", () => {
+    const cfg = defineConfig({
+      site: { name: "x" },
+      groups: [
+        {
+          id: "g",
+          name: "G",
+          components: [{ id: "c", name: "C", checks: [http("a", { url: "https://example.com", timeout: 8500 })] }],
+        },
+      ],
+    });
+    const dumped = dumpConfig(cfg) as { groups: Array<{ components: Array<{ checks: Array<{ timeout: string }> }> }> };
+    expect(dumped.groups[0]?.components[0]?.checks[0]?.timeout).toBe("8500ms");
   });
 
   it("parses YAML-like secret:NAME headers", () => {

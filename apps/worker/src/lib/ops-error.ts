@@ -32,7 +32,7 @@ const MESSAGES: Record<string, string> = {
   invalid_url: "Use an http(s) address, without a username.",
   jsonpath_invalid: "JSON path is not valid.",
   last_superadmin: "You cannot remove the last superadmin.",
-  latency: "Latency threshold must be from 1ms to 120 seconds.",
+  latency: "Degrade-above must be at least 1ms and below the timeout. At or past timeout is a failure.",
   management_unavailable:
     "Secret management requires FOXWATCH_CF_API_TOKEN, FOXWATCH_CF_ACCOUNT_ID, and FOXWATCH_CF_SCRIPT_NAME in the Worker environment.",
   mute_until: "Mute must end within the next 90 days.",
@@ -51,6 +51,7 @@ const MESSAGES: Record<string, string> = {
   setup: "Create the first account to continue.",
   start_at: "Pick a start time within the next 90 days.",
   title: "Add a public incident title.",
+  timeout: "Timeout must be from 1ms to 30 seconds.",
   too_large: "That image is still too large after resizing.",
   update_body: "Add a public incident update message.",
   userinfo_forbidden: "Put credentials in a secret-backed header, not in the URL.",

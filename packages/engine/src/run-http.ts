@@ -174,6 +174,7 @@ export async function runHttpProbe(
       body,
       latencyMs,
       expect: check.expect,
+      timeoutMs: check.timeoutMs,
       degradedIf: check.degradedIf,
     });
     return {

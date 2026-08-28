@@ -454,6 +454,7 @@ const STYLES = `
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --duration-ui: 150ms;
   --duration-press: 160ms;
+  --duration-panel: 200ms;
 }
 html[data-theme="dark"] {
   color-scheme: dark;
@@ -699,6 +700,60 @@ details[open] .chev { transform: rotate(180deg); }
 }
 .nested-inner { min-height: 0; }
 details[open] ~ .group-bar { display: none; }
+/* ponytail: accordion must move siblings (height), not clip-path. Ceiling: ::details-content + interpolate-size; older browsers snap. */
+@supports selector(::details-content) {
+  details::details-content {
+    interpolate-size: allow-keywords;
+    height: 0;
+    overflow: clip;
+    opacity: 0;
+    transition:
+      height var(--duration-panel) var(--ease-out),
+      opacity var(--duration-ui) var(--ease-out),
+      content-visibility var(--duration-panel) allow-discrete,
+      overflow 0s;
+  }
+  details[open]::details-content {
+    height: auto;
+    overflow: visible;
+    opacity: 1;
+    transition:
+      height var(--duration-panel) var(--ease-out),
+      opacity var(--duration-ui) var(--ease-out),
+      content-visibility var(--duration-panel) allow-discrete,
+      overflow 0s var(--duration-panel) allow-discrete;
+  }
+  @starting-style {
+    details[open]::details-content {
+      height: 0;
+      opacity: 0;
+    }
+  }
+  .group-bar {
+    transition:
+      height var(--duration-panel) var(--ease-out),
+      opacity var(--duration-ui) var(--ease-out),
+      overflow 0s var(--duration-panel) allow-discrete;
+  }
+  details[open] ~ .group-bar {
+    display: flex;
+    height: 0;
+    opacity: 0;
+    overflow: clip;
+    pointer-events: none;
+    transition:
+      height var(--duration-panel) var(--ease-out),
+      opacity var(--duration-ui) var(--ease-out),
+      overflow 0s allow-discrete;
+  }
+  #live-systems.is-restoring details::details-content,
+  #live-systems.is-restoring details[open]::details-content,
+  #live-systems.is-restoring .group-bar,
+  #live-systems.is-restoring details[open] ~ .group-bar,
+  #live-systems.is-restoring .chev {
+    transition: none;
+  }
+}
 .component { padding: 0.85rem 0 0.15rem; margin-left: 0.15rem; }
 .component + .component { border-top: 1px solid var(--line); margin-top: 0.7rem; padding-top: 0.85rem; }
 #live-history { margin-bottom: 2rem; }
@@ -765,6 +820,12 @@ details[open] ~ .group-bar { display: none; }
   .chev, .tip, .theme-toggle { transition-property: opacity, visibility, color, background-color, border-color; }
   .theme-icon { transition: opacity var(--duration-ui) var(--ease-out); }
   html[data-theme="dark"] .theme-icon-moon, html[data-theme="dark"] .theme-icon-sun { transform: none; }
+  details::details-content,
+  details[open]::details-content,
+  .group-bar,
+  details[open] ~ .group-bar {
+    transition: opacity var(--duration-ui) var(--ease-out);
+  }
 }
 `;
 
@@ -965,10 +1026,15 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
     return out;
   }
   function restore(ids){
+    var root=document.getElementById("live-systems");
+    if (root && ids.length) root.classList.add("is-restoring");
     for (var i=0;i<ids.length;i++){
       var el=document.querySelector('#live-systems [data-group="'+ids[i]+'"] details');
       if (el) el.open=true;
     }
+    if (root && ids.length) requestAnimationFrame(function(){
+      requestAnimationFrame(function(){ root.classList.remove("is-restoring"); });
+    });
   }
   function swap(id, html){
     var el=document.getElementById(id);

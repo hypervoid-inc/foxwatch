@@ -4,10 +4,11 @@ import { fail, failFromUnknown, opsErrorBody } from "./ops-error.ts";
 
 describe("opsErrorBody", () => {
   it("returns a sentence for known codes", () => {
-    expect(opsErrorBody("invalid_password")).toEqual({
-      error: "Password must be 12–128 characters.",
-      code: "invalid_password",
+    expect(opsErrorBody("timeout")).toEqual({
+      error: "Timeout must be from 1ms to 30 seconds.",
+      code: "timeout",
     });
+    expect(opsErrorBody("latency").error).toMatch(/below the timeout/);
   });
 
   it("passes engine sentences through", () => {

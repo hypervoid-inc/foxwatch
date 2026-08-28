@@ -916,7 +916,7 @@ function parseCheckInput(body: Record<string, unknown>): Check {
   const retries = Number(body.retries ?? 2);
   const confirmFails = Number(body.confirmFails ?? 3);
   const degradedIf = body.degradedIf as { latencyMs?: unknown } | undefined;
-  if (degradedIf && (!Number.isFinite(Number(degradedIf.latencyMs)) || Number(degradedIf.latencyMs) < 1 || Number(degradedIf.latencyMs) > 120_000)) {
+  if (degradedIf && (!Number.isFinite(Number(degradedIf.latencyMs)) || Number(degradedIf.latencyMs) < 1)) {
     throw new Error("latency");
   }
   const requestBody = typeof body.body === "string" && body.body.length > 0 ? body.body : undefined;
@@ -991,7 +991,8 @@ function parseCheckInput(body: Record<string, unknown>): Check {
   if (ch.intervalMs < MIN_INTERVAL_MS) throw new Error("interval");
   if (!Number.isInteger(ch.retries) || ch.retries < 0 || ch.retries > 5) throw new Error("retries");
   if (!Number.isInteger(ch.confirmFails) || ch.confirmFails! < 1 || ch.confirmFails! > 10) throw new Error("confirm_fails");
-  if (ch.timeoutMs > MAX_TIMEOUT_MS) ch.timeoutMs = MAX_TIMEOUT_MS;
+  if (!Number.isFinite(ch.timeoutMs) || ch.timeoutMs < 1 || ch.timeoutMs > MAX_TIMEOUT_MS) throw new Error("timeout");
+  if (ch.degradedIf && ch.degradedIf.latencyMs >= ch.timeoutMs) throw new Error("latency");
   return ch;
 }
 

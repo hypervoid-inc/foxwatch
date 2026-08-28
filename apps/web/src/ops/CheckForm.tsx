@@ -1,7 +1,24 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "./api.ts";
+import {
+  clampDuration,
+  convertDuration,
+  durationMs,
+  maxAmount,
+  sanitizeInt,
+  splitDuration,
+  unitsForCap,
+  UNIT_LABEL,
+  type DurationUnit,
+} from "./duration.ts";
+import { MAX_TIMEOUT_MS } from "@foxwatch/config";
 import { regionLabel, regionTitle } from "./labels.ts";
 import { CopyPanel, ErrorText, InfoTip, Mark, Seg, useActionFlash } from "./ui.tsx";
+
+function rejectNonDigitKey(e: KeyboardEvent<HTMLInputElement>) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key.length === 1 && !/\d/.test(e.key)) e.preventDefault();
+}
 
 const METHODS = ["GET", "HEAD", "POST"] as const;
 const INTERVALS_HTTP = ["1m", "5m", "10m", "15m", "30m", "60m"] as const;
@@ -86,11 +103,8 @@ function intervalFromMs(ms?: number): string {
   return "1m";
 }
 
-function timeoutFromMs(ms?: number): string {
-  if (ms === 5_000) return "5s";
-  if (ms === 15_000) return "15s";
-  if (ms && ms % 1000 === 0) return `${ms / 1000}s`;
-  return "10s";
+function timeoutFromMs(ms?: number): { value: string; unit: DurationUnit } {
+  return splitDuration(ms && ms > 0 ? ms : 10_000);
 }
 
 function graceFromMs(ms?: number): string {
@@ -144,16 +158,18 @@ type CheckFormState = {
   assertionFailThreshold: number;
   interval: string;
   timeout: string;
+  timeoutUnit: DurationUnit;
   grace: string;
   regions: string[];
   groupName: string;
   componentName: string;
   critical: boolean;
-  retries: number;
+  retries: string;
   followRedirects: boolean;
   failWhen: "majority" | "any" | "all";
-  confirmFails: number;
+  confirmFails: string;
   latencyThreshold: string;
+  latencyUnit: DurationUnit;
   allowedHosts: string;
 };
 
@@ -170,17 +186,19 @@ function emptyForm(): CheckFormState {
     assertions: [],
     assertionFailThreshold: 1,
     interval: "1m",
-    timeout: "10s",
+    timeout: "10",
+    timeoutUnit: "s",
     grace: "2m",
     regions: [...DEFAULT_REGIONS],
     groupName: "API",
     componentName: "",
     critical: false,
-    retries: 2,
+    retries: "2",
     followRedirects: true,
     failWhen: "majority",
-    confirmFails: 3,
+    confirmFails: "3",
     latencyThreshold: "",
+    latencyUnit: "ms",
     allowedHosts: "",
   };
 }
@@ -205,6 +223,10 @@ function formFromMonitor(m: Monitor): CheckFormState {
       assertions = [{ path: jp.path, op: "equals", value: String(jp.equals) }];
     }
   }
+  const timeout = timeoutFromMs(cfg.timeoutMs);
+  const timeoutMs = durationMs(timeout.value, timeout.unit) ?? 10_000;
+  const degradeRaw = cfg.degradedIf?.latencyMs ? splitDuration(cfg.degradedIf.latencyMs) : { value: "", unit: "ms" as const };
+  const degrade = clampDuration(degradeRaw.value, degradeRaw.unit, Math.max(1, timeoutMs - 1));
   return {
     checkType: m.type === "heartbeat" ? "heartbeat" : "http",
     name: m.name,
@@ -217,17 +239,19 @@ function formFromMonitor(m: Monitor): CheckFormState {
     assertions,
     assertionFailThreshold: expect.assertionFailThreshold ?? 1,
     interval: intervalFromMs(cfg.intervalMs),
-    timeout: timeoutFromMs(cfg.timeoutMs),
+    timeout: timeout.value,
+    timeoutUnit: timeout.unit,
     grace: graceFromMs(cfg.graceMs),
     regions: (cfg.regions?.length ? cfg.regions : [...DEFAULT_REGIONS]).slice(),
     groupName: m.groupName,
     componentName: m.componentName,
     critical: m.critical,
-    retries: Number(cfg.retries ?? 2),
+    retries: String(Number.isInteger(Number(cfg.retries)) ? Number(cfg.retries) : 2),
     followRedirects: cfg.followRedirects !== false,
     failWhen: cfg.failWhen ?? "majority",
-    confirmFails: Number(cfg.confirmFails ?? 3),
-    latencyThreshold: cfg.degradedIf?.latencyMs ? String(cfg.degradedIf.latencyMs) : "",
+    confirmFails: String(Number.isInteger(Number(cfg.confirmFails)) && Number(cfg.confirmFails) >= 1 ? Number(cfg.confirmFails) : 3),
+    latencyThreshold: degrade.value,
+    latencyUnit: degrade.unit,
     allowedHosts: (cfg.allowedHosts ?? []).join(", "),
   };
 }
@@ -240,6 +264,87 @@ type TestResult = {
   errorClass: string | null;
   responseSnippet: string | null;
 };
+
+function IntInput({
+  id,
+  value,
+  min,
+  max,
+  required,
+  placeholder,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  min: number;
+  max: number;
+  required?: boolean;
+  placeholder?: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <input
+      id={id}
+      className="check-plain check-plain-num"
+      type="number"
+      inputMode="numeric"
+      min={min}
+      max={max}
+      step={1}
+      required={required}
+      placeholder={placeholder}
+      autoComplete="off"
+      value={value}
+      onKeyDown={rejectNonDigitKey}
+      onChange={(e) => {
+        const next = sanitizeInt(e.target.value, max, min);
+        if (next === undefined) return;
+        onChange(next);
+      }}
+    />
+  );
+}
+
+function DurationInput({
+  id,
+  value,
+  unit,
+  capMs,
+  required,
+  placeholder,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  unit: DurationUnit;
+  capMs: number;
+  required?: boolean;
+  placeholder?: string;
+  onChange: (value: string, unit: DurationUnit) => void;
+}) {
+  const units = unitsForCap(capMs);
+  const max = Math.max(1, maxAmount(unit, capMs));
+  return (
+    <span className="check-duration">
+      <IntInput id={id} value={value} min={1} max={max} required={required} placeholder={placeholder} onChange={(next) => onChange(next, unit)} />
+      <select
+        className="check-plain check-unit"
+        aria-label="Unit"
+        value={units.includes(unit) ? unit : (units[0] ?? "ms")}
+        onChange={(e) => {
+          const next = e.target.value as DurationUnit;
+          onChange(convertDuration(value, unit, next, capMs), next);
+        }}
+      >
+        {units.map((id) => (
+          <option key={id} value={id}>
+            {UNIT_LABEL[id]}
+          </option>
+        ))}
+      </select>
+    </span>
+  );
+}
 
 export function CheckForm({
   monitor,
@@ -318,7 +423,7 @@ export function CheckForm({
         method: form.method,
         headers,
         body,
-        timeout: form.timeout,
+        timeout: durationMs(form.timeout, form.timeoutUnit) ?? 10_000,
         expect: { status: Number(form.expectStatus.split(",")[0]) || 200 },
       }),
     });
@@ -350,9 +455,15 @@ export function CheckForm({
       critical: form.critical,
     };
 
+    const confirmFails = Number(form.confirmFails);
+    if (!Number.isInteger(confirmFails) || confirmFails < 1 || confirmFails > 10) {
+      setError("Confirm after must be from 1 to 10 failures.");
+      return;
+    }
+
     let payload: Record<string, unknown>;
     if (form.checkType === "heartbeat") {
-      payload = { ...shared, type: "heartbeat", interval: form.interval, grace: form.grace, confirmFails: form.confirmFails };
+      payload = { ...shared, type: "heartbeat", interval: form.interval, grace: form.grace, confirmFails };
     } else {
       let url: URL;
       try {
@@ -389,9 +500,19 @@ export function CheckForm({
         setError("Expected statuses must be comma-separated HTTP status codes.");
         return;
       }
-      const latencyThreshold = form.latencyThreshold ? Number(form.latencyThreshold) : null;
-      if (latencyThreshold != null && (!Number.isInteger(latencyThreshold) || latencyThreshold < 1 || latencyThreshold > 120_000)) {
-        setError("Degraded latency must be from 1ms to 120 seconds.");
+      const timeoutMs = durationMs(form.timeout, form.timeoutUnit);
+      if (timeoutMs == null || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+        setError("Timeout must be from 1ms to 30 seconds.");
+        return;
+      }
+      const retries = Number(form.retries);
+      if (!Number.isInteger(retries) || retries < 0 || retries > 5) {
+        setError("Retries must be from 0 to 5.");
+        return;
+      }
+      const latencyThreshold = form.latencyThreshold ? durationMs(form.latencyThreshold, form.latencyUnit) : null;
+      if (form.latencyThreshold !== "" && (latencyThreshold == null || latencyThreshold < 1 || latencyThreshold >= timeoutMs)) {
+        setError("Degrade-above must be at least 1ms and below the timeout. At or past timeout is a failure.");
         return;
       }
       const allowedHosts = [...new Set(form.allowedHosts.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))];
@@ -426,11 +547,11 @@ export function CheckForm({
         allowedHosts,
         regions: form.regions.length ? form.regions : ["wnam"],
         interval: form.interval,
-        timeout: form.timeout,
-        retries: form.retries,
+        timeout: timeoutMs,
+        retries,
         followRedirects: form.followRedirects,
         failWhen: form.failWhen,
-        confirmFails: form.confirmFails,
+        confirmFails,
         degradedIf: latencyThreshold ? { latencyMs: latencyThreshold } : undefined,
         expect: {
           status: expectedStatuses.length === 1 ? expectedStatuses[0] : expectedStatuses,
@@ -654,8 +775,14 @@ export function CheckForm({
           <div className="advanced-inner">
             {form.checkType === "http" ? (
               <>
-                <div className="check-hdrs">
-                  {form.headers.map((row, i) => (
+                <div className="check-adv-cluster">
+                  <p className="check-adv-label">Request</p>
+                  <div className="check-hdrs">
+                    <span className="check-row-k">
+                      Headers
+                      <InfoTip>Sent with each probe. Use Secret for values stored in the vault.</InfoTip>
+                    </span>
+                    {form.headers.map((row, i) => (
                     <div key={i} className="check-hdr">
                       <input
                         className="check-plain"
@@ -716,150 +843,178 @@ export function CheckForm({
                     <textarea id="check-body" className="input input-code" value={form.body} onChange={(e) => set("body", e.target.value)} placeholder={'{\n  "check": true\n}'} />
                   </label>
                 ) : null}
-                <label className="check-row" htmlFor="check-timeout">
-                  <span className="check-row-k">
-                    Timeout
-                    <InfoTip>Max time to wait for a response before marking as failed.</InfoTip>
-                  </span>
-                  <select id="check-timeout" className="check-plain check-plain-end" value={form.timeout} onChange={(e) => set("timeout", e.target.value)}>
-                    {!(["5s", "10s", "15s"] as const).includes(form.timeout as never) ? <option value={form.timeout}>{form.timeout}</option> : null}
-                    <option value="5s">5 seconds</option>
-                    <option value="10s">10 seconds</option>
-                    <option value="15s">15 seconds</option>
-                  </select>
-                </label>
-                <label className="check-row" htmlFor="check-retries">
-                  <span className="check-row-k">
-                    Retries
-                    <InfoTip>Number of immediate retries before counting a probe as failed.</InfoTip>
-                  </span>
-                  <select id="check-retries" className="check-plain check-plain-end" value={form.retries} onChange={(e) => set("retries", Number(e.target.value))}>
-                    {[0, 1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value}</option>)}
-                  </select>
-                </label>
-                <label className="check-row" htmlFor="check-fail-when">
-                  <span className="check-row-k">
-                    Fail when
-                    <InfoTip>How many probe regions must fail before the check is considered failing.</InfoTip>
-                  </span>
-                  <select id="check-fail-when" className="check-plain check-plain-end" value={form.failWhen} onChange={(e) => set("failWhen", e.target.value as CheckFormState["failWhen"])}>
-                    <option value="majority">Most regions fail</option>
-                    <option value="any">Any region fails</option>
-                    <option value="all">All regions fail</option>
-                  </select>
-                </label>
-                <label className="check-row" htmlFor="check-latency">
-                  <span className="check-row-k">
-                    Degrade above
-                    <InfoTip>Latency threshold in ms. Above this, the check is marked as degraded (not failed).</InfoTip>
-                  </span>
-                  <input id="check-latency" className="check-plain check-plain-num" inputMode="numeric" value={form.latencyThreshold} onChange={(e) => set("latencyThreshold", e.target.value.replace(/\D/g, ""))} placeholder="ms (off)" />
-                </label>
-                <label className="check-row" htmlFor="check-includes">
-                  <span className="check-row-k">
-                    Must include
-                    <InfoTip>String that must appear in the response body for the check to pass.</InfoTip>
-                  </span>
-                  <input id="check-includes" className="check-plain" value={form.bodyIncludes} onChange={(e) => set("bodyIncludes", e.target.value)} placeholder='e.g. "ok"' />
-                </label>
-                <div className="check-assertions">
-                  <span className="check-row-k">
-                    Assertions
-                    <InfoTip>JSON path assertions on the response body. Use $.key.nested[0] syntax. Wildcard matching uses * and ? characters.</InfoTip>
-                  </span>
-                  {form.assertions.map((row, i) => (
-                    <div key={i} className="check-assertion-row">
-                      <input
-                        className="check-assertion-path"
-                        placeholder="$.data.status"
-                        value={row.path}
-                        onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, path: e.target.value } : a))}
-                        aria-label="JSON path"
-                      />
-                      <select
-                        className="check-assertion-op"
-                        value={row.op}
-                        onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, op: e.target.value as AssertionOp } : a))}
-                        aria-label="Operator"
-                      >
-                        {ASSERTION_OPS.map((op) => (
-                          <option key={op.value} value={op.value}>{op.label}</option>
-                        ))}
-                      </select>
-                      {row.op !== "exists" && row.op !== "not_exists" ? (
-                        <input
-                          className="check-assertion-val"
-                          placeholder={row.op === "contains" || row.op === "not_contains" ? "substring" : row.op === "matches" ? "pattern*" : "value"}
-                          value={row.value}
-                          onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, value: e.target.value } : a))}
-                          aria-label="Expected value"
-                        />
-                      ) : null}
-                      <button
-                        type="button"
-                        className="check-assertion-rm"
-                        onClick={() => set("assertions", form.assertions.filter((_, j) => j !== i))}
-                        aria-label="Remove assertion"
-                      >
-                        &times;
-                      </button>
-                    </div>
-                  ))}
-                  <button type="button" className="check-assertion-add" onClick={() => set("assertions", [...form.assertions, { path: "", op: "exists" as AssertionOp, value: "" }])}>
-                    + Add assertion
-                  </button>
-                  {form.assertions.length > 1 ? (
-                    <label className="check-row check-assertion-threshold" htmlFor="check-assert-threshold">
-                      <span className="check-row-k">
-                        Fail threshold
-                        <InfoTip>Number of assertions that must fail before the check is marked as failed.</InfoTip>
-                      </span>
-                      <input
-                        id="check-assert-threshold"
-                        className="check-plain check-plain-num"
-                        type="number"
-                        min={1}
-                        max={form.assertions.length}
-                        value={form.assertionFailThreshold}
-                        onChange={(e) => set("assertionFailThreshold", Math.max(1, Math.min(form.assertions.length, Number(e.target.value) || 1)))}
-                      />
-                    </label>
-                  ) : null}
+                  <label className="check-row" htmlFor="check-redirects">
+                    <span className="check-row-k check-row-k-wide">
+                      Redirects
+                      <InfoTip>Follow HTTP redirects to allowed hosts automatically.</InfoTip>
+                    </span>
+                    <span className="check-row-hint">Follow safe redirects</span>
+                    <input id="check-redirects" type="checkbox" checked={form.followRedirects} onChange={(e) => set("followRedirects", e.target.checked)} />
+                  </label>
                 </div>
-                <label className="check-row" htmlFor="check-redirects">
-                  <span className="check-row-k check-row-k-wide">
-                    Redirects
-                    <InfoTip>Follow HTTP redirects to allowed hosts automatically.</InfoTip>
-                  </span>
-                  <span className="check-row-hint">Follow safe redirects</span>
-                  <input id="check-redirects" type="checkbox" checked={form.followRedirects} onChange={(e) => set("followRedirects", e.target.checked)} />
-                </label>
+                <div className="check-adv-cluster">
+                  <p className="check-adv-label">Response</p>
+                  <label className="check-row" htmlFor="check-includes">
+                    <span className="check-row-k">
+                      Must include
+                      <InfoTip>String that must appear in the response body for the check to pass.</InfoTip>
+                    </span>
+                    <input id="check-includes" className="check-plain" value={form.bodyIncludes} onChange={(e) => set("bodyIncludes", e.target.value)} placeholder='e.g. "ok"' />
+                  </label>
+                  <div className="check-assertions">
+                    <span className="check-row-k">
+                      Assertions
+                      <InfoTip>JSON path assertions on the response body. Use $.key.nested[0] syntax. Wildcard matching uses * and ? characters.</InfoTip>
+                    </span>
+                    {form.assertions.map((row, i) => (
+                      <div key={i} className="check-assertion-row">
+                        <input
+                          className="check-assertion-path"
+                          placeholder="$.data.status"
+                          value={row.path}
+                          onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, path: e.target.value } : a))}
+                          aria-label="JSON path"
+                        />
+                        <select
+                          className="check-assertion-op"
+                          value={row.op}
+                          onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, op: e.target.value as AssertionOp } : a))}
+                          aria-label="Operator"
+                        >
+                          {ASSERTION_OPS.map((op) => (
+                            <option key={op.value} value={op.value}>{op.label}</option>
+                          ))}
+                        </select>
+                        {row.op !== "exists" && row.op !== "not_exists" ? (
+                          <input
+                            className="check-assertion-val"
+                            placeholder={row.op === "contains" || row.op === "not_contains" ? "substring" : row.op === "matches" ? "pattern*" : "value"}
+                            value={row.value}
+                            onChange={(e) => set("assertions", form.assertions.map((a, j) => j === i ? { ...a, value: e.target.value } : a))}
+                            aria-label="Expected value"
+                          />
+                        ) : null}
+                        <button
+                          type="button"
+                          className="check-assertion-rm"
+                          onClick={() => set("assertions", form.assertions.filter((_, j) => j !== i))}
+                          aria-label="Remove assertion"
+                        >
+                          &times;
+                        </button>
+                      </div>
+                    ))}
+                    <button type="button" className="check-assertion-add" onClick={() => set("assertions", [...form.assertions, { path: "", op: "exists" as AssertionOp, value: "" }])}>
+                      + Add assertion
+                    </button>
+                    {form.assertions.length > 1 ? (
+                      <label className="check-row check-assertion-threshold" htmlFor="check-assert-threshold">
+                        <span className="check-row-k">
+                          Fail threshold
+                          <InfoTip>Number of assertions that must fail before the check is marked as failed.</InfoTip>
+                        </span>
+                        <input
+                          id="check-assert-threshold"
+                          className="check-plain check-plain-num"
+                          type="number"
+                          min={1}
+                          max={form.assertions.length}
+                          value={form.assertionFailThreshold}
+                          onChange={(e) => set("assertionFailThreshold", Math.max(1, Math.min(form.assertions.length, Number(e.target.value) || 1)))}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="check-adv-cluster">
+                  <p className="check-adv-label">Timing</p>
+                  <label className="check-row" htmlFor="check-timeout">
+                    <span className="check-row-k">
+                      Timeout
+                      <InfoTip>Max wait for a response. The probe fails at or past this limit (up to 30 seconds). Type a whole number and pick ms or sec.</InfoTip>
+                    </span>
+                    <DurationInput
+                      id="check-timeout"
+                      value={form.timeout}
+                      unit={form.timeoutUnit}
+                      capMs={MAX_TIMEOUT_MS}
+                      required
+                      onChange={(timeout, timeoutUnit) =>
+                        setForm((f) => {
+                          const timeoutMs = durationMs(timeout, timeoutUnit) ?? MAX_TIMEOUT_MS;
+                          const next = clampDuration(f.latencyThreshold, f.latencyUnit, Math.max(1, timeoutMs - 1));
+                          return { ...f, timeout, timeoutUnit, latencyThreshold: next.value, latencyUnit: next.unit };
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="check-row" htmlFor="check-latency">
+                    <span className="check-row-k">
+                      Degrade above
+                      <InfoTip>Latency that marks the check degraded, not failed. Must be below timeout. At or past timeout is a failure. Leave empty to turn off.</InfoTip>
+                    </span>
+                    <DurationInput
+                      id="check-latency"
+                      value={form.latencyThreshold}
+                      unit={form.latencyUnit}
+                      capMs={Math.max(1, (durationMs(form.timeout, form.timeoutUnit) ?? MAX_TIMEOUT_MS) - 1)}
+                      placeholder="off"
+                      onChange={(latencyThreshold, latencyUnit) => setForm((f) => ({ ...f, latencyThreshold, latencyUnit }))}
+                    />
+                  </label>
+                </div>
               </>
             ) : null}
-            <label className="check-row" htmlFor="check-confirm-fails">
-              <span className="check-row-k">
-                Confirm after
-                <InfoTip>Number of consecutive failures needed before the public status changes. Prevents flapping.</InfoTip>
-              </span>
-              <select id="check-confirm-fails" className="check-plain check-plain-end" value={form.confirmFails} onChange={(e) => set("confirmFails", Number(e.target.value))}>
-                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((value) => <option key={value} value={value}>{value} {value === 1 ? "failure" : "failures"}</option>)}
-              </select>
-            </label>
-            <label className="check-row" htmlFor="check-component">
-              <span className="check-row-k">
-                Component
-                <InfoTip>Public-facing component name. Defaults to the check name. Multiple checks can share one component.</InfoTip>
-              </span>
-              <input id="check-component" className="check-plain" value={form.componentName} onChange={(e) => set("componentName", e.target.value)} placeholder="Same as name" />
-            </label>
-            <label className="check-row" htmlFor="check-critical">
-              <span className="check-row-k check-row-k-wide">
-                Critical
-                <InfoTip>When critical, a failure marks the entire public page as "Outage" immediately.</InfoTip>
-              </span>
-              <span className="check-row-hint">Failures take the public page to failing</span>
-              <input id="check-critical" type="checkbox" checked={form.critical} onChange={(e) => set("critical", e.target.checked)} />
-            </label>
+            <div className="check-adv-cluster">
+              <p className="check-adv-label">Failures</p>
+              {form.checkType === "http" ? (
+                <>
+                  <label className="check-row" htmlFor="check-retries">
+                    <span className="check-row-k">
+                      Retries
+                      <InfoTip>Number of immediate retries before counting a probe as failed (0–5).</InfoTip>
+                    </span>
+                    <IntInput id="check-retries" value={form.retries} min={0} max={5} required onChange={(retries) => set("retries", retries)} />
+                  </label>
+                  <label className="check-row" htmlFor="check-fail-when">
+                    <span className="check-row-k">
+                      Fail when
+                      <InfoTip>How many probe regions must fail before the check is considered failing.</InfoTip>
+                    </span>
+                    <select id="check-fail-when" className="check-plain check-plain-end" value={form.failWhen} onChange={(e) => set("failWhen", e.target.value as CheckFormState["failWhen"])}>
+                      <option value="majority">Most regions fail</option>
+                      <option value="any">Any region fails</option>
+                      <option value="all">All regions fail</option>
+                    </select>
+                  </label>
+                </>
+              ) : null}
+              <label className="check-row" htmlFor="check-confirm-fails">
+                <span className="check-row-k">
+                  Confirm after
+                  <InfoTip>Consecutive failures before the public status changes (1–10). Prevents flapping.</InfoTip>
+                </span>
+                <IntInput id="check-confirm-fails" value={form.confirmFails} min={1} max={10} required onChange={(confirmFails) => set("confirmFails", confirmFails)} />
+              </label>
+            </div>
+            <div className="check-adv-cluster">
+              <p className="check-adv-label">Status page</p>
+              <label className="check-row" htmlFor="check-component">
+                <span className="check-row-k">
+                  Component
+                  <InfoTip>Public-facing component name. Defaults to the check name. Multiple checks can share one component.</InfoTip>
+                </span>
+                <input id="check-component" className="check-plain" value={form.componentName} onChange={(e) => set("componentName", e.target.value)} placeholder="Same as name" />
+              </label>
+              <label className="check-row" htmlFor="check-critical">
+                <span className="check-row-k check-row-k-wide">
+                  Critical
+                  <InfoTip>When critical, a failure marks the entire public page as "Outage" immediately.</InfoTip>
+                </span>
+                <span className="check-row-hint">Failures take the public page to failing</span>
+                <input id="check-critical" type="checkbox" checked={form.critical} onChange={(e) => set("critical", e.target.checked)} />
+              </label>
+            </div>
           </div>
         </div>
       </details>

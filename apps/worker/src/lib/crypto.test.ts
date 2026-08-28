@@ -362,6 +362,10 @@ describe("public brand", () => {
     expect(html).toContain("nth-child(-n+24)");
     expect(html).toContain(".nested-inner { min-height: 0; }");
     expect(html).not.toContain("grid-template-rows");
+    expect(html).toContain("::details-content");
+    expect(html).toContain("interpolate-size: allow-keywords");
+    expect(html).toContain("--duration-panel: 200ms");
+    expect(html).toContain("is-restoring");
     expect(html).toContain('<header class="top">');
     expect(html).toContain('id="live-brand"');
     expect(html).toContain('data-banner="fully_operational"');

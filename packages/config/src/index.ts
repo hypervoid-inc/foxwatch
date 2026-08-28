@@ -14,7 +14,7 @@ export type Region = (typeof REGIONS)[number];
 
 export const MAX_MONITORS = 100;
 export const MIN_INTERVAL_MS = 30_000;
-export const MAX_TIMEOUT_MS = 15_000;
+export const MAX_TIMEOUT_MS = 30_000;
 export const MAX_REGIONS = 8;
 export const DEFAULT_TIMEOUT_MS = 10_000;
 export const DEFAULT_RETRIES = 2;
@@ -190,6 +190,10 @@ function parseDuration(input: string | number, field: string): number {
   return ms;
 }
 
+function dumpDuration(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`;
+}
+
 function assertId(id: string, label: string) {
   if (!ID_RE.test(id)) {
     throw new Error(`${label} id "${id}" must match ${ID_RE}`);
@@ -311,6 +315,9 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
   if (!Number.isInteger(retries) || retries < 0 || retries > 5) {
     throw new Error(`check ${check.id} retries must be an integer from 0 to 5`);
   }
+  if (timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+    throw new Error(`check ${check.id} timeout must be from 1ms to ${MAX_TIMEOUT_MS}ms`);
+  }
   const confirmFails = check.confirmFails ?? defaults.confirmFails;
   if (!Number.isInteger(confirmFails) || confirmFails < 1 || confirmFails > 10) {
     throw new Error(`check ${check.id} confirmFails must be an integer from 1 to 10`);
@@ -329,13 +336,17 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
   if (check.body && new TextEncoder().encode(check.body).byteLength > BODY_READ_LIMIT) {
     throw new Error(`check ${check.id} body must be <= ${BODY_READ_LIMIT} bytes`);
   }
+  const degradedIf = check.degradedIf ?? defaults.degradedIf;
+  if (degradedIf && degradedIf.latencyMs >= timeoutMs) {
+    throw new Error(`check ${check.id} degrade-above must be below timeout`);
+  }
   return {
     ...check,
     regions,
     intervalMs,
     timeoutMs,
     retries,
-    degradedIf: check.degradedIf ?? defaults.degradedIf,
+    degradedIf,
     failWhen: check.failWhen ?? defaults.failWhen,
     confirmFails,
   };
@@ -359,6 +370,9 @@ export function defineConfig(input: DefineConfigInput): FoxwatchConfig {
   };
   if (!Number.isInteger(defaults.retries) || defaults.retries < 0 || defaults.retries > 5) {
     throw new Error("defaults.retries must be an integer from 0 to 5");
+  }
+  if (defaults.degradedIf && defaults.degradedIf.latencyMs >= defaults.timeoutMs) {
+    throw new Error("defaults degrade-above must be below timeout");
   }
   if (!Number.isInteger(defaults.confirmFails) || defaults.confirmFails < 1 || defaults.confirmFails > 10) {
     throw new Error("defaults.confirmFails must be an integer from 1 to 10");
@@ -590,7 +604,7 @@ export function dumpConfig(config: FoxwatchConfig): unknown {
     regions: config.regions,
     defaults: {
       interval: `${config.defaults.intervalMs / 1000}s`,
-      timeout: `${config.defaults.timeoutMs / 1000}s`,
+      timeout: dumpDuration(config.defaults.timeoutMs),
       retries: config.defaults.retries,
       degradedIf: config.defaults.degradedIf,
       failWhen: config.defaults.failWhen,
@@ -627,7 +641,7 @@ export function dumpConfig(config: FoxwatchConfig): unknown {
             regions: ch.regions,
             method: ch.method,
             interval: `${ch.intervalMs / 1000}s`,
-            timeout: `${ch.timeoutMs / 1000}s`,
+            timeout: dumpDuration(ch.timeoutMs),
             retries: ch.retries,
             headers,
             expect: ch.expect,
