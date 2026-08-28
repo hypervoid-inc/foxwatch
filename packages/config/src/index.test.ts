@@ -152,6 +152,18 @@ describe("defineConfig", () => {
     expect(dumped.groups[0]?.components[0]?.checks[0]?.timeout).toBe("8500ms");
   });
 
+  it("defaults the public globe on and can turn it off", () => {
+    expect(base().site.globe).toBe(true);
+    const off = defineConfig({ site: { name: "Acme", globe: false }, groups: [] });
+    expect(off.site.globe).toBe(false);
+    const dumped = dumpConfig(off) as { site: { globe: boolean } };
+    expect(dumped.site.globe).toBe(false);
+    expect(
+      configFromYamlLike({ site: { name: "Acme", globe: false }, groups: [] }).site.globe,
+    ).toBe(false);
+    expect(() => configFromYamlLike({ site: { name: "x", globe: "no" }, groups: [] })).toThrow(/site.globe/);
+  });
+
   it("parses YAML-like secret:NAME headers", () => {
     const cfg = configFromYamlLike({
       site: { name: "Acme" },

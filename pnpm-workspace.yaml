@@ -3,8 +3,11 @@ packages:
 
 trustPolicy: any
 
-# esbuild and workerd download native binaries in postinstall.
-# pnpm 11 fails CI with ERR_PNPM_IGNORED_BUILDS unless these are allowed.
+# Native postinstall scripts. pnpm 11 fails CI with ERR_PNPM_IGNORED_BUILDS
+# unless these are allowed. esbuild/workerd ship Worker binaries; vgpu pulls
+# @vgpu/adapter-node and webgpu for the status-page globe.
 allowBuilds:
   esbuild: true
   workerd: true
+  "@vgpu/adapter-node": true
+  webgpu: true

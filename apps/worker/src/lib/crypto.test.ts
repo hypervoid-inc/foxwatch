@@ -51,6 +51,7 @@ describe("public snapshot shape", () => {
     expect(json.toLowerCase()).not.toContain("authorization");
     expect(json).not.toContain("errorSnippet");
     expect(snap.groups[0]?.components[0]).not.toHaveProperty("url");
+    expect(snap.globe).toBe(true);
   });
 
   it("keeps a public homepage url on the snapshot", () => {
@@ -67,6 +68,23 @@ describe("public snapshot shape", () => {
     });
     expect(snap.homepageUrl).toBe("https://construct.com/");
     expect(snap.iconUrl).toBe("/icon?v=1");
+    expect(snap.globe).toBe(true);
+  });
+
+  it("keeps globe off when the snapshot asks", () => {
+    const snap = publicSnapshot({
+      siteName: "Acme",
+      homepageUrl: null,
+      iconUrl: null,
+      globe: false,
+      banner: "fully_operational",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [],
+    });
+    expect(snap.globe).toBe(false);
   });
 
   it("copies region impact onto the public snapshot", () => {
@@ -177,6 +195,40 @@ describe("public html", () => {
     expect(html).not.toMatch(/jsdelivr|unpkg|cdnjs|cdn\./i);
     expect(html).not.toContain("From the edge");
     expect(html).not.toMatch(/https?:\/\/example\.com/);
+  });
+
+  it("omits globe assets when the snapshot disables the globe", async () => {
+    const { renderPublicHtml } = await import("./public-html.ts");
+    const html = renderPublicHtml({
+      siteName: "Acme",
+      globe: false,
+      banner: "fully_operational",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [],
+      observers: [
+        {
+          region: "weur",
+          label: "West EU",
+          title: "West Europe",
+          colo: "LHR",
+          outcome: "pass",
+          latencyMs: 80,
+          checkedAt: 1,
+        },
+      ],
+    });
+    expect(html).toContain("From the edge");
+    expect(html).toContain('id="live-mesh"');
+    expect(html).not.toContain('id="globe-stage"');
+    expect(html).not.toContain('id="globe-land"');
+    expect(html).not.toContain("envelope=1.16");
+    expect(html).not.toContain("status-globe");
+    expect(html).not.toContain("/assets/globe.js");
+    expect(html).not.toContain("fw-globe-gpu");
+    expect(html).toMatch(/body:has\(#globe-stage\) #live-mesh\.mesh \{ display: none; \}/);
   });
 
   it("varies tick height by latency and keeps empty days short", async () => {

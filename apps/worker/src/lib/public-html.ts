@@ -779,11 +779,11 @@ canvas.globe-labels {
   to { opacity: 1; }
 }
 @media (min-width: 1100px) and (hover: hover) and (pointer: fine) {
-  html { overflow-y: scroll; scrollbar-gutter: stable; }
+  html:has(#globe-stage) { overflow-y: scroll; scrollbar-gutter: stable; }
   .globe-stage:not([hidden]) { display: block; }
   body:has(#globe-stage:not([hidden])) canvas.globe-labels { display: block; }
   body:has(#globe-stage.is-ready) canvas.globe-labels { opacity: 1; }
-  #live-mesh.mesh { display: none; }
+  body:has(#globe-stage) #live-mesh.mesh { display: none; }
   body:has(#globe-stage) .wrap {
     margin-right: auto;
     margin-left: max(0px, min(
@@ -1144,6 +1144,7 @@ export function snapshotEtag(snap: PublicSnapshot): string {
     siteName: snap.siteName,
     homepageUrl: snap.homepageUrl ?? null,
     iconUrl: snap.iconUrl ?? null,
+    globe: snap.globe !== false,
     lastTick: snap.lastTick,
     groups: snap.groups,
     incidents: snap.incidents,
@@ -1499,7 +1500,20 @@ const GUTTER_BOOT = `(function(){try{if(!matchMedia("(min-width: 1100px) and (ho
 
 const THEME_TOGGLE = `<button type="button" class="theme-toggle" aria-label="Use dark appearance"><span class="theme-icon theme-icon-moon" aria-hidden="true"></span><span class="theme-icon theme-icon-sun" aria-hidden="true"></span></button>`;
 
+function globeEnabled(snap: PublicSnapshot): boolean {
+  return snap.globe !== false;
+}
+
+function renderGlobeScripts(snap: PublicSnapshot): string {
+  if (!globeEnabled(snap)) return `<script>${LIVE_CLIENT_SCRIPT}</script>`;
+  return `<aside class="globe-stage" id="globe-stage" hidden aria-hidden="true"></aside>
+  <script type="application/json" id="globe-land">${JSON.stringify(landRings())}</script>
+  <script>${LIVE_CLIENT_SCRIPT}${GLOBE_CLIENT_SCRIPT}</script>
+  <script type="module" src="${GLOBE_MODULE_SRC}"></script>`;
+}
+
 export function renderPublicHtml(snap: PublicSnapshot): string {
+  const globe = globeEnabled(snap);
   return `<!doctype html>
 <html lang="en" data-banner="${escapeHtml(snap.banner)}">
 <head>
@@ -1511,7 +1525,7 @@ export function renderPublicHtml(snap: PublicSnapshot): string {
   <link rel="icon" href="${pageIcon(snap)}"/>
   <script>${THEME_BOOT}</script>
   <style>${STYLES}</style>
-  <script>${GUTTER_BOOT}</script>
+  ${globe ? `<script>${GUTTER_BOOT}</script>` : ""}
 </head>
 <body>
   <div class="wrap">
@@ -1531,10 +1545,7 @@ export function renderPublicHtml(snap: PublicSnapshot): string {
       <p class="disclaimer">Availability is measured from Cloudflare's edge. Figures are aggregated across regions and checks; individual experience may vary by path and location.</p>
     </footer>
   </div>
-  <aside class="globe-stage" id="globe-stage" hidden aria-hidden="true"></aside>
-  <script type="application/json" id="globe-land">${JSON.stringify(landRings())}</script>
-  <script>${LIVE_CLIENT_SCRIPT}${GLOBE_CLIENT_SCRIPT}</script>
-  <script type="module" src="${GLOBE_MODULE_SRC}"></script>
+  ${renderGlobeScripts(snap)}
 </body>
 </html>`;
 }

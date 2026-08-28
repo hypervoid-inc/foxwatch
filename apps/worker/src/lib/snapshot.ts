@@ -73,9 +73,16 @@ export type InstanceSettings = {
   secrets: string[];
   homepageUrl: string | null;
   iconUpdatedAt: number | null;
+  globe: boolean;
 };
 
-const DEFAULT_SETTINGS: InstanceSettings = { siteName: "Foxwatch", secrets: [], homepageUrl: null, iconUpdatedAt: null };
+const DEFAULT_SETTINGS: InstanceSettings = {
+  siteName: "Foxwatch",
+  secrets: [],
+  homepageUrl: null,
+  iconUpdatedAt: null,
+  globe: true,
+};
 const MAX_ICON_BYTES = 256 * 1024;
 const ICON_KEY = "icon";
 
@@ -117,6 +124,7 @@ function parseSettings(raw: string): InstanceSettings {
       secrets: [...new Set(secrets)].sort(),
       homepageUrl,
       iconUpdatedAt,
+      globe: parsed.globe !== false,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -592,6 +600,7 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
     siteName,
     homepageUrl: settings.homepageUrl,
     iconUrl: iconPublicUrl(settings.iconUpdatedAt),
+    globe: settings.globe,
     banner,
     stale,
     lastTick,

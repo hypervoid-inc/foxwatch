@@ -24,6 +24,7 @@ export function Settings({
   const [name, setName] = useState(siteName);
   const [homepageUrl, setHomepageUrl] = useState("");
   const [iconUrl, setIconUrl] = useState<string | null>(null);
+  const [globe, setGlobe] = useState(true);
   const [secrets, setSecrets] = useState<Array<{ name: string; set: boolean }>>([]);
   const [manageable, setManageable] = useState(false);
   const [nextName, setNextName] = useState("");
@@ -41,11 +42,14 @@ export function Settings({
   const { flash, flashOk } = useActionFlash();
 
   async function refresh() {
-    const site = await api<{ siteName: string; homepageUrl: string; iconUrl: string | null }>("/api/ops/settings");
+    const site = await api<{ siteName: string; homepageUrl: string; iconUrl: string | null; globe: boolean }>(
+      "/api/ops/settings",
+    );
     if (site.ok) {
       setName(site.data.siteName);
       setHomepageUrl(site.data.homepageUrl);
       setIconUrl(site.data.iconUrl);
+      setGlobe(site.data.globe !== false);
     }
     const secs = await api<{ secrets: Array<{ name: string; set: boolean }>; manageable: boolean }>("/api/ops/secrets");
     if (secs.ok) {
@@ -67,7 +71,10 @@ export function Settings({
     e.preventDefault();
     setError(null);
     setPending(true);
-    const res = await api("/api/ops/settings", { method: "PATCH", body: JSON.stringify({ siteName: name, homepageUrl }) });
+    const res = await api("/api/ops/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ siteName: name, homepageUrl, globe }),
+    });
     setPending(false);
     if (!res.ok) {
       setError(res.error);
@@ -197,7 +204,7 @@ export function Settings({
         <form className="card set-card" onSubmit={saveName}>
           <div className="set-card-head">
             <h2 className="section-title">Public site</h2>
-            <p className="section-copy">Name, icon, and header link on the public page.</p>
+            <p className="section-copy">Name, icon, header link, and globe on the public page.</p>
           </div>
           <section className="check-sheet" aria-label="Public site">
             <label className="check-row" htmlFor="site-name">
@@ -238,6 +245,14 @@ export function Settings({
                 </button>
               ) : null}
             </div>
+            <label className="check-row" htmlFor="site-globe">
+              <span className="check-row-k check-row-k-wide">
+                Globe
+                <InfoTip>Desktop WebGPU globe on the public status page. Off keeps the flat edge map on wide screens.</InfoTip>
+              </span>
+              <span className="check-row-hint">Show on wide screens</span>
+              <input id="site-globe" type="checkbox" checked={globe} onChange={(e) => setGlobe(e.target.checked)} />
+            </label>
           </section>
           <div className="check-form-actions">
             <button className="btn btn-primary btn-flash" disabled={pending} type="submit">

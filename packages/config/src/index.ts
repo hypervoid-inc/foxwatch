@@ -149,6 +149,8 @@ export type FoxwatchConfig = {
   site: {
     name: string;
     publicUrl?: string;
+    /** Desktop WebGPU globe on the public page. Defaults to true. */
+    globe: boolean;
   };
   secrets: string[];
   regions: Region[];
@@ -279,7 +281,7 @@ export function heartbeat(id: string, input: HeartbeatInput): HeartbeatCheck {
 }
 
 export type DefineConfigInput = {
-  site: { name: string; publicUrl?: string };
+  site: { name: string; publicUrl?: string; globe?: boolean };
   secrets?: string[];
   regions?: Region[];
   defaults?: {
@@ -354,6 +356,9 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
 
 export function defineConfig(input: DefineConfigInput): FoxwatchConfig {
   if (!input.site?.name?.trim()) throw new Error("site.name is required");
+  if (input.site.globe != null && typeof input.site.globe !== "boolean") {
+    throw new Error("site.globe must be a boolean");
+  }
   const secrets = [...new Set(input.secrets ?? [])];
   for (const name of secrets) secret(name);
 
@@ -418,7 +423,14 @@ export function defineConfig(input: DefineConfigInput): FoxwatchConfig {
     return { ...a, events: a.events.length ? a.events : (["fail", "degrade", "recover"] as AlertEvent[]) };
   });
 
-  return { site: input.site, secrets, regions, defaults, groups, alerts };
+  return {
+    site: { ...input.site, globe: input.site.globe !== false },
+    secrets,
+    regions,
+    defaults,
+    groups,
+    alerts,
+  };
 }
 
 export function flattenConfig(config: FoxwatchConfig, origin: Origin = "git"): FlattenedMonitor[] {
@@ -528,7 +540,7 @@ function parseSecretValue(raw: unknown): string | SecretRef {
 export function configFromYamlLike(raw: unknown): FoxwatchConfig {
   if (!raw || typeof raw !== "object") throw new Error("config must be an object");
   const r = raw as Record<string, unknown>;
-  const site = r.site as { name: string; publicUrl?: string };
+  const site = r.site as { name: string; publicUrl?: string; globe?: boolean };
   const groupsIn = (r.groups as Array<Record<string, unknown>>) ?? [];
   const groups: GroupDef[] = groupsIn.map((g) => ({
     id: String(g.id),

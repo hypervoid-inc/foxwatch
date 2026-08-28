@@ -412,11 +412,17 @@ app.get("/api/ops/settings", async (c) => {
     secrets: settings.secrets,
     homepageUrl: settings.homepageUrl ?? "",
     iconUrl: settings.iconUpdatedAt ? `/icon?v=${settings.iconUpdatedAt}` : null,
+    globe: settings.globe,
   });
 });
 
 app.patch("/api/ops/settings", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as { siteName?: unknown; secrets?: unknown; homepageUrl?: unknown };
+  const body = (await c.req.json().catch(() => ({}))) as {
+    siteName?: unknown;
+    secrets?: unknown;
+    homepageUrl?: unknown;
+    globe?: unknown;
+  };
   const current = await loadSettings(c.env);
   let homepageUrl = current.homepageUrl;
   if ("homepageUrl" in body) {
@@ -427,10 +433,11 @@ app.patch("/api/ops/settings", async (c) => {
     }
   }
   const next = await saveSettings(c.env, {
+    ...current,
     siteName: typeof body.siteName === "string" ? body.siteName : current.siteName,
     secrets: Array.isArray(body.secrets) ? body.secrets.map(String) : current.secrets,
     homepageUrl,
-    iconUpdatedAt: current.iconUpdatedAt,
+    globe: typeof body.globe === "boolean" ? body.globe : current.globe,
   });
   await audit(c.env, actorOf(c), "update-settings");
   await publishSnapshot(c.env);
@@ -439,6 +446,7 @@ app.patch("/api/ops/settings", async (c) => {
     secrets: next.secrets,
     homepageUrl: next.homepageUrl ?? "",
     iconUrl: next.iconUpdatedAt ? `/icon?v=${next.iconUpdatedAt}` : null,
+    globe: next.globe,
   });
 });
 

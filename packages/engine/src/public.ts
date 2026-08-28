@@ -55,6 +55,8 @@ export type PublicSnapshot = {
   homepageUrl?: string | null;
   /** Same-origin icon path, e.g. `/icon?v=123`. Null uses the default mark. */
   iconUrl?: string | null;
+  /** Desktop WebGPU globe. Omitted or true shows it; false keeps the flat map. */
+  globe?: boolean;
   banner: BannerStatus;
   stale: boolean;
   lastTick: number | null;
@@ -93,6 +95,7 @@ export function publicSnapshot(input: PublicSnapshot): PublicSnapshot {
     siteName: input.siteName,
     homepageUrl: input.homepageUrl ?? null,
     iconUrl: input.iconUrl ?? null,
+    globe: input.globe !== false,
     banner: input.banner,
     stale: input.stale,
     lastTick: input.lastTick,
