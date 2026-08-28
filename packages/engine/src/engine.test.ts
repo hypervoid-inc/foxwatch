@@ -7,6 +7,21 @@ import {
   confirmFlip,
   regionImpact,
   statusDotColor,
+  publicObservers,
+  meshArcs,
+  meshCaption,
+  observerReadout,
+  projectPct,
+  nearestRegion,
+  ringRem,
+  landPaths,
+  landRings,
+  graticuleLines,
+  latLngToVec,
+  rotateYawPitch,
+  lookAtYawPitch,
+  slerp,
+  sampleTrajectory,
   evaluateHttp,
   heartbeatOutcome,
   parseHomepageUrl,
@@ -303,5 +318,75 @@ describe("region impact", () => {
       ],
     );
     expect(impact?.items[0]).toMatchObject({ outcome: "fail", detail: "timeout" });
+  });
+});
+
+describe("edge observers", () => {
+  it("aggregates live observers and places them on the map", () => {
+    const observers = publicObservers(
+      ["global", "wnam", "weur", "apac", "wnam"],
+      [
+        { region: "wnam", outcome: "pass", latencyMs: 42, colo: "sjc", checkedAt: 10 },
+        { region: "wnam", outcome: "degraded", latencyMs: 900, colo: "SFO", checkedAt: 9 },
+        { region: "weur", outcome: "pass", latencyMs: 80, colo: "LHR", checkedAt: 10 },
+        { region: "global", outcome: "fail", colo: "XXX", checkedAt: 10 },
+      ],
+    );
+    expect(observers.map((o) => o.region)).toEqual(["wnam", "weur", "apac"]);
+    expect(observers[0]).toMatchObject({ outcome: "degraded", colo: "SFO", latencyMs: 900 });
+    expect(observers[1]).toMatchObject({ outcome: "pass", colo: "LHR", latencyMs: 80 });
+    expect(observers[2]).toMatchObject({ outcome: "unknown", colo: null, latencyMs: null });
+    expect(meshCaption(observers)).toBe("1 region degraded · 80–900ms");
+    expect(observerReadout(observers[0]!)).toBe("West North America · SFO · 900ms · slow");
+
+    const sfo = projectPct(-121.93, 37.36);
+    const ewr = projectPct(-74.17, 40.69);
+    const syd = projectPct(151.18, -33.95);
+    expect(sfo.x).toBeLessThan(ewr.x);
+    expect(syd.x).toBeGreaterThan(ewr.x);
+    expect(syd.y).toBeGreaterThan(sfo.y);
+    expect(sfo.x).toBeGreaterThan(1);
+    expect(sfo.x).toBeLessThan(99);
+
+    const arcs = meshArcs(["wnam", "enam", "weur", "apac"]);
+    const keys = arcs.map((a) => (a.a < a.b ? `${a.a}|${a.b}` : `${a.b}|${a.a}`));
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain("enam|wnam");
+    expect(arcs.length).toBeGreaterThanOrEqual(3);
+    expect(arcs.length).toBeLessThan(8);
+    expect(nearestRegion(19.07, 72.88, ["wnam", "weur", "apac"])).toBe("apac");
+    expect(ringRem(null, 100)).toBe(null);
+    expect(ringRem(100, 100)).toBe("2.80rem");
+    expect(ringRem(0, 100)).toBe(null);
+  });
+
+  it("draws denser land and a graticule for the public map", () => {
+    const rings = landRings();
+    const pts = rings.reduce((n, ring) => n + ring.length, 0);
+    expect(rings.length).toBeGreaterThan(80);
+    expect(pts).toBeGreaterThan(3000);
+    expect(rings.some((ring) => ring.some(([lng, lat]) => (lng ?? 0) < -80 && (lng ?? 0) > -90 && (lat ?? 0) > 24 && (lat ?? 0) < 31))).toBe(true);
+    expect(landPaths().every((d) => d.startsWith("M") && d.endsWith("Z"))).toBe(true);
+    expect(graticuleLines().length).toBeGreaterThan(16);
+  });
+});
+
+describe("globe math", () => {
+  it("maps lat/lng onto a unit sphere and great-circle hops", () => {
+    const eq = latLngToVec(0, 0);
+    expect(eq.z).toBeCloseTo(1, 5);
+    expect(eq.x).toBeCloseTo(0, 5);
+    expect(latLngToVec(0, 90).x).toBeCloseTo(1, 5);
+    expect(latLngToVec(90, 0).y).toBeCloseTo(1, 5);
+    const faced = rotateYawPitch(latLngToVec(0, 90), lookAtYawPitch(0, 90).yaw, 0);
+    expect(faced.z).toBeGreaterThan(0.9);
+    const ny = latLngToVec(40.7, -74.2);
+    const lon = latLngToVec(51.5, -0.1);
+    const mid = slerp(ny, lon, 0.5);
+    expect(mid.y).toBeGreaterThan(0.5);
+    const hop = sampleTrajectory(ny, lon, 8);
+    expect(hop[0]).toEqual(ny);
+    const peak = hop[4]!;
+    expect(Math.hypot(peak.x, peak.y, peak.z)).toBeGreaterThan(1.05);
   });
 });

@@ -1,6 +1,28 @@
 import type { ComponentStatus } from "@foxwatch/config";
 import type { PublicComponent, PublicSnapshot, RegionImpact } from "@foxwatch/engine";
-import { escapeHtml, impactAriaLabel, impactTitle, impactTone, statusDotColor } from "@foxwatch/engine";
+import {
+  escapeHtml,
+  impactAriaLabel,
+  impactTitle,
+  impactTone,
+  statusDotColor,
+  meshArcs,
+  meshCaption,
+  meshProjAttr,
+  observerKind,
+  observerReadout,
+  projectPct,
+  ringRem,
+  landPaths,
+  landRings,
+  graticuleLines,
+  REGION_COORDS,
+} from "@foxwatch/engine";
+import { GLOBE_CLIENT_SCRIPT } from "./public-globe.ts";
+
+export const GLOBE_MODULE_SRC = import.meta.env.DEV
+  ? "/apps/web/src/status-globe/main.ts"
+  : "/assets/globe.js";
 
 type PublicDay = PublicComponent["days"][number];
 type PublicIncident = PublicSnapshot["incidents"][number];
@@ -292,7 +314,7 @@ function renderImpact(impact: RegionImpact | undefined): string {
     : impact.items
         .map((item) => {
           const kind = item.outcome === "fail" ? "bad" : "warn";
-          return `<li><span class="impact-pill ${kind}">${escapeHtml(item.label)} <span class="impact-detail">${escapeHtml(item.detail)}</span></span></li>`;
+          return `<li><span class="impact-pill ${kind}" data-region="${escapeHtml(item.region)}">${escapeHtml(item.label)} <span class="impact-detail">${escapeHtml(item.detail)}</span></span></li>`;
         })
         .join("");
   return `<ul class="impact" aria-label="${escapeHtml(impactAriaLabel(impact))}">${pills}</ul>`;
@@ -470,6 +492,7 @@ const STYLES = `
   --duration-ui: 150ms;
   --duration-press: 160ms;
   --duration-panel: 200ms;
+  --duration-enter: 700ms;
 }
 html[data-theme="dark"] {
   color-scheme: dark;
@@ -520,7 +543,7 @@ html[data-theme="dark"] {
   }
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--ink); min-height: 100%; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); min-height: 100%; overflow-x: hidden; }
 html.theme-ready {
   transition:
     --bg var(--duration-ui) var(--ease-out),
@@ -557,6 +580,7 @@ a { color: inherit; }
   max-width: var(--max); margin: 0 auto; padding: 1.5rem 1.25rem 3.5rem;
   min-height: 100vh; min-height: 100dvh;
   display: flex; flex-direction: column;
+  position: relative; z-index: 1;
 }
 main { flex: 1 0 auto; }
 .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1rem; margin-bottom: 1.25rem; }
@@ -628,6 +652,152 @@ html[data-theme="dark"] .theme-icon-sun { opacity: 1; transform: rotate(0deg); }
   border: 1px solid var(--warn-line); border-radius: 8px;
   color: var(--warn-ink); background: var(--warn-bg); font-size: 0.8125rem;
 }
+.mesh { margin: 1.5rem 0 0; }
+.mesh .card-head { padding-bottom: 0.35rem; }
+.mesh-plot {
+  position: relative; height: 13.25rem; margin: 0 0.35rem 0.15rem;
+  border-radius: 8px; overflow: hidden; background: var(--card);
+  touch-action: manipulation;
+}
+.mesh-plot svg {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+}
+.mesh-ocean { fill: var(--card); }
+.mesh-land {
+  fill: color-mix(in srgb, var(--empty) 72%, var(--line) 28%);
+  stroke: var(--line); stroke-width: 0.22; stroke-linejoin: round;
+}
+.mesh-grid { stroke: var(--line); fill: none; stroke-width: 0.12; opacity: 0.42; }
+.mesh-arc {
+  fill: none; stroke: var(--line); stroke-width: 0.34; opacity: 0.9;
+  transition: opacity var(--duration-ui) var(--ease-out), stroke var(--duration-ui) var(--ease-out);
+}
+.mesh-hop {
+  fill: none; stroke: var(--ink); stroke-width: 0.28; stroke-dasharray: 0.9 0.9; opacity: 0.4;
+  transition: opacity var(--duration-ui) var(--ease-out);
+}
+.mesh-hits { position: absolute; inset: 0; }
+.mesh-node {
+  position: absolute; width: 1.75rem; height: 1.75rem; margin: 0; padding: 0;
+  border: 0; background: transparent; color: var(--ok); cursor: pointer;
+  transform: translate(-50%, -50%);
+  transition: transform var(--duration-press) var(--ease-out), opacity var(--duration-ui) var(--ease-out);
+}
+.mesh-node.warn { color: var(--warn); }
+.mesh-node.bad { color: var(--bad); }
+.mesh-node.empty { color: var(--muted); }
+.mesh-node::before {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  width: 0.62rem; height: 0.62rem;
+  transform: translate(-50%, -50%);
+  border-radius: 50%; background: currentColor;
+  box-shadow: 0 0 0 2px var(--card);
+}
+.mesh-node.empty::before {
+  background: var(--empty); box-shadow: 0 0 0 1px var(--line), 0 0 0 2px var(--card);
+}
+.mesh-node.has-ring::after {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  width: var(--ring, 1.4rem); height: var(--ring, 1.4rem);
+  transform: translate(-50%, -50%);
+  border: 1px solid currentColor; border-radius: 50%; opacity: 0.38;
+  pointer-events: none;
+}
+.mesh-node:active { transform: translate(-50%, -50%) scale(0.97); }
+@media (hover: hover) and (pointer: fine) {
+  .mesh-node:hover { transform: translate(-50%, -50%) scale(1.08); }
+}
+.mesh-node:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 50%; }
+.mesh-you {
+  position: absolute; width: 0.5rem; height: 0.5rem;
+  transform: translate(-50%, -50%) rotate(45deg);
+  background: var(--ink); pointer-events: none; z-index: 2;
+}
+.mesh-plot.is-hot .mesh-arc { opacity: 0.14; }
+.mesh-plot.is-hot .mesh-arc.is-on { opacity: 0.95; stroke: var(--ink); }
+.mesh-plot.is-hot .mesh-hop { opacity: 0.12; }
+.mesh-plot.is-hot .mesh-node { opacity: 0.38; }
+.mesh-plot.is-hot .mesh-node.is-on { opacity: 1; }
+.mesh-plot.is-hot .mesh-you { opacity: 0.35; }
+.mesh-readout {
+  margin: 0; padding: 0.45rem 1.15rem 0.95rem;
+  color: var(--muted); font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums; min-height: 2.35rem;
+}
+.mesh-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
+.globe-stage {
+  display: none;
+  position: fixed; inset: 0; z-index: 0;
+  pointer-events: none;
+  user-select: none;
+  overflow: hidden;
+  transform-origin: var(--globe-cx, 70%) var(--globe-cy, 38%);
+}
+.globe-stage:not([hidden]):not(.is-in):not(.is-ready) { opacity: 0; }
+.globe-stage.is-in {
+  animation:
+    globe-fade var(--duration-enter) linear both,
+    globe-settle var(--duration-enter) linear both,
+    globe-focus var(--duration-enter) linear both;
+  will-change: opacity, filter, transform;
+}
+.globe-stage canvas {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%; display: block;
+  pointer-events: auto; cursor: grab; touch-action: none;
+}
+.globe-stage.is-drag canvas { cursor: grabbing; }
+canvas.globe-labels {
+  display: none;
+  position: fixed; inset: 0;
+  width: 100%; height: 100%;
+  z-index: 20;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0;
+  transition: opacity 400ms linear;
+}
+@keyframes globe-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes globe-settle {
+  from { transform: scale(0.97); }
+  to { transform: none; }
+}
+@keyframes globe-focus {
+  0% { filter: blur(12px); }
+  40% { filter: blur(5px); }
+  70% { filter: blur(2px); }
+  100% { filter: blur(0); }
+}
+@keyframes globe-arrive-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (min-width: 1100px) and (hover: hover) and (pointer: fine) {
+  html { overflow-y: scroll; scrollbar-gutter: stable; }
+  .globe-stage:not([hidden]) { display: block; }
+  body:has(#globe-stage:not([hidden])) canvas.globe-labels { display: block; }
+  body:has(#globe-stage.is-ready) canvas.globe-labels { opacity: 1; }
+  #live-mesh.mesh { display: none; }
+  body:has(#globe-stage) .wrap {
+    margin-right: auto;
+    margin-left: max(0px, min(
+      calc((100% - var(--max)) / 2),
+      calc(var(--globe-left, calc(100% - clamp(22rem, 42vw, 38rem))) - var(--max) - 1.25rem)
+    ));
+  }
+  body:has(#globe-stage:not([hidden])) .wrap { pointer-events: none; }
+  body:has(#globe-stage:not([hidden])) .top,
+  body:has(#globe-stage:not([hidden])) .foot,
+  body:has(#globe-stage:not([hidden])) .card,
+  body:has(#globe-stage:not([hidden])) .banner,
+  body:has(#globe-stage:not([hidden])) .stale { pointer-events: auto; }
+}
 .systems { margin: 1.5rem 0; }
 .card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); overflow: visible; }
 .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding: 0.9rem 1.15rem 0.7rem; }
@@ -651,6 +821,7 @@ summary .svc-label { cursor: pointer; }
 }
 .impact-pill.warn { background: var(--warn-bg); color: var(--warn-ink); }
 .impact-pill.bad { background: var(--bad-bg); color: var(--bad-ink); }
+.impact-pill.is-on { box-shadow: 0 0 0 1px currentColor; }
 .impact-detail { font-weight: 500; opacity: 0.82; }
 .maint-label { color: var(--warn-ink); font-size: 0.75rem; font-weight: 600; flex: none; }
 .count { color: var(--muted); font-size: 0.8rem; font-weight: 400; flex: none; }
@@ -835,14 +1006,21 @@ details[open] ~ .group-bar { display: none; }
   .wrap { padding: 1.25rem 1rem 2.5rem; }
   .banner-head h1 { font-size: 1.1rem; }
   .bar { height: 1.1rem; }
+  .mesh-plot { height: 10.25rem; }
   .uptime { font-size: 0.75rem; }
   .count { display: none; }
   .uptime-word { font-size: 0.7rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   html.theme-ready { transition: none; }
+  .globe-stage.is-in {
+    animation: globe-arrive-fade var(--duration-panel) var(--ease-out) both;
+    will-change: opacity;
+  }
+  canvas.globe-labels { transition-duration: var(--duration-ui); }
   .chev, .tip, .theme-toggle, .theme-icon { transform: none; }
-  .chev, .tip, .theme-toggle { transition-property: opacity, visibility, color, background-color, border-color; }
+  .mesh-node, .mesh-node:active, .mesh-node:hover { transform: translate(-50%, -50%); }
+  .chev, .tip, .theme-toggle, .mesh-arc, .mesh-hop, .mesh-node { transition-property: opacity, visibility, color, background-color, border-color, stroke; }
   .theme-icon { transition: opacity var(--duration-ui) var(--ease-out); }
   html[data-theme="dark"] .theme-icon-moon, html[data-theme="dark"] .theme-icon-sun { transform: none; }
   details::details-content,
@@ -872,6 +1050,57 @@ export function renderBannerBlock(snap: PublicSnapshot): string {
         </div>
         <p class="banner-body">${escapeHtml(BODY[snap.banner])}</p>
       </section>${renderNotices(snap)}</div>`;
+}
+
+export function renderMeshBlock(snap: PublicSnapshot): string {
+  const observers = snap.observers ?? [];
+  if (!observers.length) return `<section id="live-mesh" hidden></section>`;
+  const maxLatency = observers.reduce((m, o) => Math.max(m, o.latencyMs ?? 0), 0);
+  const regions = observers.map((o) => o.region);
+  const arcs = meshArcs(regions);
+  const land = landPaths()
+    .map((d) => `<path d="${d}"/>`)
+    .join("");
+  const grid = graticuleLines()
+    .map((l) => `<line x1="${l.x1}" y1="${l.y1}" x2="${l.x2}" y2="${l.y2}"/>`)
+    .join("");
+  const arcEls = arcs
+    .map((a) => `<path class="mesh-arc" data-a="${escapeHtml(a.a)}" data-b="${escapeHtml(a.b)}" d="${a.d}"/>`)
+    .join("");
+  const nodes = observers
+    .map((o) => {
+      const coord = REGION_COORDS[o.region];
+      if (!coord) return "";
+      const p = projectPct(coord.lng, coord.lat);
+      const kind = observerKind(o.outcome);
+      const ring = ringRem(o.latencyMs, maxLatency);
+      const read = observerReadout(o);
+      const ringAttr = ring ? ` style="left:${p.x}%;top:${p.y}%;--ring:${ring}"` : ` style="left:${p.x}%;top:${p.y}%"`;
+      const ringClass = ring ? " has-ring" : "";
+      return `<button type="button" class="mesh-node ${kind}${ringClass}" data-region="${escapeHtml(o.region)}" data-label="${escapeHtml(o.label)}" data-read="${escapeHtml(read)}" data-lat="${coord.lat}" data-lng="${coord.lng}"${ringAttr} aria-label="${escapeHtml(read)}"></button>`;
+    })
+    .join("");
+  const caption = meshCaption(observers);
+  const sr = `<ul class="mesh-sr">${observers.map((o) => `<li>${escapeHtml(observerReadout(o))}</li>`).join("")}</ul>`;
+  return `<section class="card mesh" id="live-mesh" aria-labelledby="mesh-title">
+        <div class="card-head">
+          <h2 id="mesh-title">From the edge</h2>
+          <p class="range">Live</p>
+        </div>
+        <div class="mesh-plot" data-proj="${meshProjAttr()}">
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+            <rect class="mesh-ocean" width="100" height="100"/>
+            <g class="mesh-grid">${grid}</g>
+            <g class="mesh-land">${land}</g>
+            <g class="mesh-arcs">${arcEls}</g>
+            <path class="mesh-hop" hidden></path>
+          </svg>
+          <div class="mesh-hits">${nodes}</div>
+          <span class="mesh-you" hidden></span>
+        </div>
+        ${sr}
+        <p class="mesh-readout" data-base="${escapeHtml(caption)}">${escapeHtml(caption)}</p>
+      </section>`;
 }
 
 export function renderSystemsBlock(snap: PublicSnapshot): string {
@@ -919,6 +1148,7 @@ export function snapshotEtag(snap: PublicSnapshot): string {
     groups: snap.groups,
     incidents: snap.incidents,
     maintenance: snap.maintenance ?? [],
+    observers: snap.observers ?? [],
   });
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) {
@@ -937,6 +1167,7 @@ export type LivePayload = {
   brand: string;
   banner: string;
   systems: string;
+  mesh: string;
   history: string;
   maintenance: string;
 };
@@ -951,6 +1182,7 @@ export function renderLivePayload(snap: PublicSnapshot): LivePayload {
     brand: renderBrandBlock(snap),
     banner: renderBannerBlock(snap),
     systems: renderSystemsBlock(snap),
+    mesh: renderMeshBlock(snap),
     history: renderHistoryBlock(snap),
     maintenance: renderMaintenanceBlock(snap),
   };
@@ -968,6 +1200,7 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
     if (!b) return;
     var t=theme();
     b.setAttribute("aria-label", t==="dark"?"Use light appearance":"Use dark appearance");
+    if (window.__fwGlobe) window.__fwGlobe.paint();
   }
   function applyTheme(t){
     document.documentElement.setAttribute("data-theme", t);
@@ -1075,10 +1308,14 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
     var open=groups();
     swap("live-banner", msg.banner);
     swap("live-systems", msg.systems);
+    swap("live-mesh", msg.mesh);
     swap("live-history", msg.history);
     swap("live-maintenance", msg.maintenance);
     swap("live-brand", msg.brand);
     restore(open);
+    bindMesh();
+    placeYou(hereCache);
+    if (window.__fwGlobe) window.__fwGlobe.refresh();
     if (msg.title) document.title=msg.title;
     if (msg.icon) iconSrc=msg.icon;
     if (msg.status){
@@ -1111,10 +1348,154 @@ export const LIVE_CLIENT_SCRIPT = `(function(){
     };
     timer=setInterval(function(){ if (ws && ws.readyState===1) ws.send("ping"); }, 25000);
   }
+  var hereCache=null, meshBound=null;
+  function projectHere(plot, lng, lat){
+    var p=(plot.getAttribute("data-proj")||"").split(",");
+    if (p.length<8) return null;
+    var west=+p[0], east=+p[1], north=+p[2], south=+p[3], x0=+p[4], x1=+p[5], y0=+p[6], y1=+p[7];
+    if (!(east-west) || !(north-south)) return null;
+    var x=x0+(lng-west)/(east-west)*(x1-x0);
+    var y=y0+(north-lat)/(north-south)*(y1-y0);
+    return { x:Math.max(1,Math.min(99,x)), y:Math.max(1,Math.min(99,y)) };
+  }
+  function km(aLat, aLng, bLat, bLng){
+    var r=Math.PI/180, dLat=(bLat-aLat)*r, dLng=(bLng-aLng)*r;
+    var s=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(aLat*r)*Math.cos(bLat*r)*Math.sin(dLng/2)*Math.sin(dLng/2);
+    return 2*6371*Math.asin(Math.min(1, Math.sqrt(s)));
+  }
+  function meshRoot(){ return document.getElementById("live-mesh"); }
+  function setMeshOn(id){
+    var root=meshRoot();
+    if (!root || root.hasAttribute("hidden")) return;
+    var plot=root.querySelector(".mesh-plot");
+    var out=root.querySelector(".mesh-readout");
+    if (!plot || !out) return;
+    var base=out.getAttribute("data-base")||"";
+    var nodes=plot.querySelectorAll(".mesh-node");
+    var arcs=plot.querySelectorAll(".mesh-arc");
+    var on=false, read=base;
+    for (var i=0;i<nodes.length;i++){
+      var n=nodes[i];
+      var match=!!id && n.getAttribute("data-region")===id;
+      n.classList.toggle("is-on", match);
+      if (match){ on=true; read=n.getAttribute("data-read")||base; }
+    }
+    for (var j=0;j<arcs.length;j++){
+      var a=arcs[j];
+      a.classList.toggle("is-on", !!id && (a.getAttribute("data-a")===id || a.getAttribute("data-b")===id));
+    }
+    plot.classList.toggle("is-hot", on);
+    out.textContent=on?read:base;
+    var pills=document.querySelectorAll(".impact-pill[data-region]");
+    for (var k=0;k<pills.length;k++) pills[k].classList.toggle("is-on", !!id && pills[k].getAttribute("data-region")===id);
+  }
+  function bindMesh(){
+    var root=meshRoot();
+    if (meshBound){ meshBound(); meshBound=null; }
+    if (!root || root.hasAttribute("hidden")) return;
+    var plot=root.querySelector(".mesh-plot");
+    if (!plot) return;
+    var fine=window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+    var onMove=function(e){
+      var nodes=plot.querySelectorAll(".mesh-node");
+      var r=plot.getBoundingClientRect();
+      if (!r.width || !r.height || !nodes.length) return;
+      var x=(e.clientX-r.left)/r.width*100, y=(e.clientY-r.top)/r.height*100;
+      var best=null, bestD=1e9;
+      for (var i=0;i<nodes.length;i++){
+        var n=nodes[i], nx=parseFloat(n.style.left), ny=parseFloat(n.style.top);
+        var d=(nx-x)*(nx-x)+(ny-y)*(ny-y);
+        if (d<bestD){ bestD=d; best=n.getAttribute("data-region"); }
+      }
+      setMeshOn(best);
+    };
+    var onLeave=function(){ setMeshOn(null); };
+    var onFocus=function(e){
+      var t=e.target;
+      if (t && t.getAttribute) setMeshOn(t.getAttribute("data-region"));
+    };
+    if (fine){
+      plot.addEventListener("pointermove", onMove);
+      plot.addEventListener("pointerleave", onLeave);
+    }
+    var onClick=function(e){
+      var t=e.target;
+      if (!t || !t.closest) return;
+      var n=t.closest(".mesh-node");
+      if (n) setMeshOn(n.getAttribute("data-region"));
+    };
+    plot.addEventListener("focusin", onFocus);
+    plot.addEventListener("focusout", onLeave);
+    plot.addEventListener("click", onClick);
+    meshBound=function(){
+      plot.removeEventListener("pointermove", onMove);
+      plot.removeEventListener("pointerleave", onLeave);
+      plot.removeEventListener("focusin", onFocus);
+      plot.removeEventListener("focusout", onLeave);
+      plot.removeEventListener("click", onClick);
+    };
+  }
+  function placeYou(h){
+    if (h){ hereCache=h; window.__fwHere=h; }
+    var root=meshRoot();
+    if (!root || root.hasAttribute("hidden") || !h){
+      if (window.__fwGlobe) window.__fwGlobe.refresh();
+      return;
+    }
+    var plot=root.querySelector(".mesh-plot");
+    var out=root.querySelector(".mesh-readout");
+    var you=root.querySelector(".mesh-you");
+    var hop=root.querySelector(".mesh-hop");
+    if (!plot || !out){
+      if (window.__fwGlobe) window.__fwGlobe.refresh();
+      return;
+    }
+    var base=out.getAttribute("data-base")||"";
+    var youName=h.city||h.colo;
+    var nodes=plot.querySelectorAll(".mesh-node");
+    var nearest=null, nearestNode=null, nearestD=1e9;
+    if (h.lat!=null && h.lng!=null){
+      for (var i=0;i<nodes.length;i++){
+        var n=nodes[i], lat=+n.getAttribute("data-lat"), lng=+n.getAttribute("data-lng");
+        if (!isFinite(lat) || !isFinite(lng)) continue;
+        var d=km(h.lat, h.lng, lat, lng);
+        if (d<nearestD){ nearestD=d; nearest=n.getAttribute("data-region"); nearestNode=n; }
+      }
+    }
+    if (youName){
+      var extra="You · "+youName;
+      if (nearestNode) extra+=" · nearest "+(nearestNode.getAttribute("data-label")||nearest);
+      var next=base?base+" · "+extra:extra;
+      out.setAttribute("data-base", next);
+      if (!plot.classList.contains("is-hot")) out.textContent=next;
+    }
+    if (you && h.lat!=null && h.lng!=null){
+      var p=projectHere(plot, h.lng, h.lat);
+      if (p){
+        you.style.left=p.x+"%";
+        you.style.top=p.y+"%";
+        you.hidden=false;
+        if (hop && nearestNode){
+          var nx=parseFloat(nearestNode.style.left), ny=parseFloat(nearestNode.style.top);
+          hop.setAttribute("d", "M"+p.x.toFixed(2)+" "+p.y.toFixed(2)+" L"+nx+" "+ny);
+          hop.removeAttribute("hidden");
+        }
+      }
+    }
+    if (window.__fwGlobe) window.__fwGlobe.refresh();
+  }
+  function fetchHere(){
+    fetch("/api/here.json", {headers:{accept:"application/json"}}).then(function(r){ return r.ok?r.json():null; }).then(placeYou).catch(function(){});
+  }
+  window.__fwPickRegion = setMeshOn;
+  bindMesh();
+  fetchHere();
   connect();
 })();`;
 
 const THEME_BOOT = `(function(){try{var k="foxwatch-theme",t=localStorage.getItem(k);if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);document.documentElement.style.colorScheme=t;var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",t==="dark"?"#2c2b28":"#efece6");}catch(e){}requestAnimationFrame(function(){document.documentElement.classList.add("theme-ready");});})();`;
+
+const GUTTER_BOOT = `(function(){try{if(!matchMedia("(min-width: 1100px) and (hover: hover) and (pointer: fine)").matches)return;var w=Math.max(1,Math.round(document.documentElement.clientWidth||innerWidth)),h=Math.max(1,Math.round(document.documentElement.clientHeight||innerHeight)),rem=parseFloat(getComputedStyle(document.documentElement).fontSize)||16,pad=24,envelope=1.16;function mix(a,b,t){t=t<0?0:t>1?1:t;return a+(b-a)*t;}var t1280=(w-1100)/180,t1440=(w-1280)/160,widthFrac=mix(0.4,mix(0.43,0.46,t1440),t1280),radius=Math.min(h*mix(0.7,0.78,t1280),rem*mix(32,38,t1280))*0.48,targetCy=h*mix(0.36,0.4,t1280),maxR=Math.min((w*widthFrac)/envelope,Math.max(8,(targetCy-pad)/envelope),Math.max(8,(h-pad-targetCy)/envelope));if(maxR>0&&radius>maxR)radius=maxR;if(!(radius>0)||!isFinite(radius))radius=80;var cy=targetCy,minCy=pad+radius*envelope,maxCy=h-pad-radius*envelope;if(minCy<=maxCy)cy=Math.min(maxCy,Math.max(minCy,cy));else cy=h/2;var cx=w-pad-radius*envelope;if(cx+radius*envelope>w-pad)cx=w-pad-radius*envelope;if(cx-radius*envelope<pad)radius=Math.max(8,Math.min(radius,(cx-pad)/envelope));var root=document.documentElement;root.style.setProperty("--globe-left",Math.round(cx-radius)+"px");root.style.setProperty("--globe-cx",Math.round(cx)+"px");root.style.setProperty("--globe-cy",Math.round(cy)+"px");}catch(e){}})();`;
 
 const THEME_TOGGLE = `<button type="button" class="theme-toggle" aria-label="Use dark appearance"><span class="theme-icon theme-icon-moon" aria-hidden="true"></span><span class="theme-icon theme-icon-sun" aria-hidden="true"></span></button>`;
 
@@ -1130,6 +1511,7 @@ export function renderPublicHtml(snap: PublicSnapshot): string {
   <link rel="icon" href="${pageIcon(snap)}"/>
   <script>${THEME_BOOT}</script>
   <style>${STYLES}</style>
+  <script>${GUTTER_BOOT}</script>
 </head>
 <body>
   <div class="wrap">
@@ -1139,6 +1521,7 @@ export function renderPublicHtml(snap: PublicSnapshot): string {
     </header>
     <main>
       ${renderBannerBlock(snap)}
+      ${renderMeshBlock(snap)}
       ${renderSystemsBlock(snap)}
       ${renderMaintenanceBlock(snap)}
       ${renderHistoryBlock(snap)}
@@ -1148,7 +1531,10 @@ export function renderPublicHtml(snap: PublicSnapshot): string {
       <p class="disclaimer">Availability is measured from Cloudflare's edge. Figures are aggregated across regions and checks; individual experience may vary by path and location.</p>
     </footer>
   </div>
-  <script>${LIVE_CLIENT_SCRIPT}</script>
+  <aside class="globe-stage" id="globe-stage" hidden aria-hidden="true"></aside>
+  <script type="application/json" id="globe-land">${JSON.stringify(landRings())}</script>
+  <script>${LIVE_CLIENT_SCRIPT}${GLOBE_CLIENT_SCRIPT}</script>
+  <script type="module" src="${GLOBE_MODULE_SRC}"></script>
 </body>
 </html>`;
 }

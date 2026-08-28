@@ -18,6 +18,24 @@ export {
 export { sanitizeText, escapeHtml, escapeXml } from "./sanitize.ts";
 export { publicSnapshot, type PublicSnapshot, type PublicComponent, type PublicDay } from "./public.ts";
 export {
+  publicObservers,
+  meshArcs,
+  meshCaption,
+  meshProjAttr,
+  observerReadout,
+  observerKind,
+  projectPct,
+  nearestRegion,
+  ringRem,
+  landPaths,
+  landRings,
+  graticuleLines,
+  REGION_COORDS,
+  MESH_PROJ,
+  type PublicObserver,
+  type ObserverRun,
+} from "./observers.ts";
+export {
   regionImpact,
   regionLabel,
   regionTitle,
@@ -29,3 +47,13 @@ export {
   type RegionRunDetail,
 } from "./regions.ts";
 export { runHttpProbe, parseColo, DEFAULT_PROBE_USER_AGENT, type ProbeResult } from "./run-http.ts";
+export {
+  latLngToVec,
+  rotateYawPitch,
+  lookAtYawPitch,
+  clampPitch,
+  slerp,
+  trajectoryPoint,
+  sampleTrajectory,
+  type Vec3,
+} from "./globe.ts";

@@ -42,10 +42,11 @@ import {
   setupFirstUser,
 } from "./auth/accounts.ts";
 import { fail, failFromUnknown } from "./lib/ops-error.ts";
+import { visitorFromRequest } from "./lib/visitor.ts";
 
-const PUBLIC_HEADERS = {
+export const PUBLIC_HEADERS = {
   "content-security-policy":
-    "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
   "x-frame-options": "DENY",
@@ -74,7 +75,13 @@ app.use("*", async (c, next) => {
   if (c.req.path.startsWith("/admin") || c.req.path.startsWith("/ops") || c.req.path.startsWith("/api/ops")) {
     for (const [k, v] of Object.entries(OPS_HEADERS)) c.header(k, v);
   } else if (!c.req.path.startsWith("/assets")) {
-    for (const [k, v] of Object.entries(PUBLIC_HEADERS)) c.header(k, v);
+    for (const [k, v] of Object.entries(PUBLIC_HEADERS)) {
+      if (k === "cache-control" && c.req.path === "/api/here.json") {
+        c.header(k, "private, no-store");
+      } else {
+        c.header(k, v);
+      }
+    }
   }
 });
 
@@ -86,6 +93,10 @@ app.get("/", async (c) => {
 app.get("/history", async (c) => {
   const snap = await readSnapshot(c.env);
   return c.html(renderHistoryPage(snap), 200, PUBLIC_HEADERS);
+});
+
+app.get("/api/here.json", (c) => {
+  return c.json(visitorFromRequest(c.req.raw), 200, { "cache-control": "private, no-store" });
 });
 
 app.get("/api/status.json", async (c) => {

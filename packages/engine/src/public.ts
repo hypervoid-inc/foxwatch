@@ -1,6 +1,7 @@
 import type { BannerStatus, ComponentStatus } from "@foxwatch/config";
 import type { RegionImpact } from "./regions.ts";
 import { sanitizeText } from "./sanitize.ts";
+import type { PublicObserver } from "./observers.ts";
 
 export type PublicDay = {
   date: string;
@@ -70,6 +71,8 @@ export type PublicSnapshot = {
   }>;
   maintenance: PublicMaintenance[];
   incidents: PublicIncident[];
+  /** Live HTTP probe regions. Empty when the site only has heartbeats. */
+  observers: PublicObserver[];
 };
 
 function copyImpact(impact?: RegionImpact | null): RegionImpact | undefined {
@@ -112,6 +115,22 @@ export function publicSnapshot(input: PublicSnapshot): PublicSnapshot {
       })),
     })),
     maintenance: (input.maintenance ?? []).map((window) => ({ ...window })),
+    observers: (input.observers ?? []).map((observer) => ({
+      region: sanitizeText(observer.region, 16),
+      label: sanitizeText(observer.label, 40),
+      title: sanitizeText(observer.title, 40),
+      colo: observer.colo ? sanitizeText(observer.colo, 8) : null,
+      outcome:
+        observer.outcome === "fail" || observer.outcome === "degraded" || observer.outcome === "pass"
+          ? observer.outcome
+          : "unknown",
+      latencyMs:
+        typeof observer.latencyMs === "number" && Number.isFinite(observer.latencyMs) && observer.latencyMs > 0
+          ? Math.round(observer.latencyMs)
+          : null,
+      checkedAt:
+        typeof observer.checkedAt === "number" && Number.isFinite(observer.checkedAt) ? observer.checkedAt : null,
+    })),
     incidents: input.incidents.map((i) => ({
       id: i.id,
       componentIds: [...(i.componentIds ?? [])],

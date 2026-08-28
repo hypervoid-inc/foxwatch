@@ -10,6 +10,8 @@ import {
   secret,
   configFromYamlLike,
   monitorFromFlat,
+  MAX_REGIONS,
+  REGIONS,
 } from "./index.ts";
 
 const base = () =>
@@ -40,6 +42,30 @@ const base = () =>
   });
 
 describe("defineConfig", () => {
+  it("allows every Cloudflare probe region", () => {
+    expect(MAX_REGIONS).toBe(REGIONS.length);
+    const cfg = defineConfig({
+      site: { name: "Acme" },
+      regions: [...REGIONS],
+      groups: [
+        {
+          id: "g",
+          name: "G",
+          components: [
+            {
+              id: "c",
+              name: "C",
+              checks: [http("all-regions", { url: "https://example.com", regions: [...REGIONS] })],
+            },
+          ],
+        },
+      ],
+    });
+    const check = cfg.groups[0]!.components[0]!.checks[0]!;
+    expect(check.type).toBe("http");
+    if (check.type === "http") expect(check.regions).toEqual([...REGIONS]);
+  });
+
   it("fills defaults and flattens checks", () => {
     const cfg = base();
     const flat = flattenConfig(cfg);

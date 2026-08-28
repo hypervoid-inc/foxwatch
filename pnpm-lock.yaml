@@ -29,6 +29,9 @@ importers:
       react-dom:
         specifier: ^19.1.1
         version: 19.2.8(react@19.2.8)
+      vgpu:
+        specifier: ^0.3.0
+        version: 0.3.0(supports-color@10.2.2)
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.13.0
@@ -45,9 +48,15 @@ importers:
       '@types/react-dom':
         specifier: ^19.1.9
         version: 19.2.4(@types/react@19.2.18)
+      '@vgpu/wgsl':
+        specifier: ^0.3.0
+        version: 0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))
       '@vitejs/plugin-react':
         specifier: ^5.0.2
         version: 5.2.0(supports-color@10.2.2)(vite@7.3.6(jiti@2.7.0)(lightningcss@1.32.0)(yaml@2.9.0))
+      '@webgpu/types':
+        specifier: ^0.1.71
+        version: 0.1.71
       tailwindcss:
         specifier: ^4.1.13
         version: 4.3.3
@@ -1001,6 +1010,26 @@ packages:
   '@types/react@19.2.18':
     resolution: {integrity: sha512-AnzbBERsrLKtk2XSfTbYRLjQPdy116Sty4q+T+Bp3IC4l6jNBvreVPAHmpq9qhXQM7CXZPjLVmGMw9sy+hxQ3w==}
 
+  '@vgpu/adapter-mock@0.3.0':
+    resolution: {integrity: sha512-j5+VIXLbxB3cZ/DMCwPv50HcUCnNjytjkLWQUvtfRL1DsQ5ifgV2r3LzJ8HZOu8QXjAY1+eKu/YLWqyNATAlGw==}
+
+  '@vgpu/adapter-node@0.3.0':
+    resolution: {integrity: sha512-K4QUoXM1b+TZNpRDXkoRWMv+JWs8UZqCDBFG7uaEUK0a5xRrt/PekXodCGHMpcjF4sjOLWi7v1njIjRuicJJNA==}
+
+  '@vgpu/core@0.3.0':
+    resolution: {integrity: sha512-QiST31WQ/b7FuN/iZA0zJqxSmu1+hibVJMqXRqpbVhCbzQS8wccTXUyxlMe7b2CEkmg+uuKfQPKgbZfqxv41WQ==}
+
+  '@vgpu/wgsl-std@0.3.0':
+    resolution: {integrity: sha512-N0LbeSyr4HjlnMkVA5tqJ3GPz812YUGpLGQoSWjDE37OJxgjfNmiQ5fhF7wYSDl4vWM3Z4C/ZQASDdT9nzJbRw==}
+
+  '@vgpu/wgsl@0.3.0':
+    resolution: {integrity: sha512-JLbTIZZkZPQ+BVhJ+PZ3rOCwBJAT0+dgMx4Dk7xtn0fdzY6CZAt2Fzgg16c8UBapLe8fTfq6aenrKpOzZ3xmaQ==}
+    peerDependencies:
+      '@vgpu/adapter-node': '>=0.1.6 <1.0.0'
+    peerDependenciesMeta:
+      '@vgpu/adapter-node':
+        optional: true
+
   '@vitejs/plugin-react@5.2.0':
     resolution: {integrity: sha512-YmKkfhOAi3wsB1PhJq5Scj3GXMn3WvtQ/JC0xoopuHoXSdmtdStOpFrYaT1kie2YgFBcIe64ROzMYRjCrYOdYw==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -1035,6 +1064,9 @@ packages:
 
   '@vitest/utils@3.2.7':
     resolution: {integrity: sha512-x6BDOd7dyo3PFLY3I9/HJ25X/6OurhGXk2/B9gOZNPF7XDVjeBK4k01lQE5uvDpbuheErh91qYuE1E2OEjK3Rw==}
+
+  '@webgpu/types@0.1.71':
+    resolution: {integrity: sha512-mMy8/ODcKhab808co15eW+yN+HgXoQxRQHTiBV9Mrvl1r0ufnid7YOcI+gi4eUWSWl9ezD6TW2KXccrL8HCh2A==}
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -1389,6 +1421,14 @@ packages:
     resolution: {integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==}
     engines: {node: '>=12'}
 
+  pixelmatch@7.2.0:
+    resolution: {integrity: sha512-xhcb4yHu9sM/G7foGzoLtXYcC0zHEaOXXjRKhGup0fw78Nf2Tkiapv4EQyMzrbcmQPsllAI7DbFY2UT7PlI9Pg==}
+    hasBin: true
+
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
+
   postcss@8.5.26:
     resolution: {integrity: sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==}
     engines: {node: ^10 || ^12 || >=14}
@@ -1497,6 +1537,10 @@ packages:
     peerDependencies:
       browserslist: '>= 4.21.0'
 
+  vgpu@0.3.0:
+    resolution: {integrity: sha512-3d93mjMa2BUSSsk4M3n1ArCNETV+5AaKOl0KqgJ/HsjRSpyeFNZwtCaAWlXwYOOartgwRFhaggDACR4kA12pBg==}
+    hasBin: true
+
   vite-node@3.2.4:
     resolution: {integrity: sha512-EbKSKh+bh1E1IFxeO0pg1n4dvoOTt0UDiXMd/qn++r98+jPO1xtJilvXldeuQ8giIB5IkpjCgMleHMNEsGH6pg==}
     engines: {node: ^18.0.0 || ^20.0.0 || >=22.0.0}
@@ -1569,6 +1613,12 @@ packages:
         optional: true
       jsdom:
         optional: true
+
+  webgpu@0.4.0:
+    resolution: {integrity: sha512-F5pimn3Aoi0zWjuRdiVs5TnrUwSzD2lESBohsIUsqyitWkGRQlXU2fhV6ycXlQTa1bvAf3sjqiUpBEpmSQ5ptA==}
+
+  wgpu-matrix@3.4.2:
+    resolution: {integrity: sha512-IfZFbG7olEYBD76VCZy2TzqM57GKy3LT++AZh37tMHPPByO6R2h61zXGBZFNPi2IzxNivNi8y5dvze5PjaczjA==}
 
   why-is-node-running@2.3.0:
     resolution: {integrity: sha512-hUrmaWBdVDcxvYqnyh09zunKzROWjbZTiNy8dBEjkS7ehEDQibXJ7XvlmtbwuTclUiIyN+CyXQD4Vmko8fNm8w==}
@@ -2265,6 +2315,33 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
+  '@vgpu/adapter-mock@0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))':
+    dependencies:
+      '@vgpu/core': 0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))
+    transitivePeerDependencies:
+      - '@vgpu/adapter-node'
+
+  '@vgpu/adapter-node@0.3.0(supports-color@10.2.2)':
+    dependencies:
+      '@vgpu/core': 0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))
+      webgpu: 0.4.0(supports-color@10.2.2)
+    transitivePeerDependencies:
+      - supports-color
+
+  '@vgpu/core@0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))':
+    dependencies:
+      '@vgpu/wgsl': 0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))
+    transitivePeerDependencies:
+      - '@vgpu/adapter-node'
+
+  '@vgpu/wgsl-std@0.3.0': {}
+
+  '@vgpu/wgsl@0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))':
+    dependencies:
+      '@vgpu/wgsl-std': 0.3.0
+    optionalDependencies:
+      '@vgpu/adapter-node': 0.3.0(supports-color@10.2.2)
+
   '@vitejs/plugin-react@5.2.0(supports-color@10.2.2)(vite@7.3.6(jiti@2.7.0)(lightningcss@1.32.0)(yaml@2.9.0))':
     dependencies:
       '@babel/core': 7.29.7(supports-color@10.2.2)
@@ -2318,6 +2395,8 @@ snapshots:
       '@vitest/pretty-format': 3.2.7
       loupe: 3.2.1
       tinyrainbow: 2.0.0
+
+  '@webgpu/types@0.1.71': {}
 
   assertion-error@2.0.1: {}
 
@@ -2558,6 +2637,12 @@ snapshots:
 
   picomatch@4.0.5: {}
 
+  pixelmatch@7.2.0:
+    dependencies:
+      pngjs: 7.0.0
+
+  pngjs@7.0.0: {}
+
   postcss@8.5.26:
     dependencies:
       nanoid: 3.3.18
@@ -2693,6 +2778,20 @@ snapshots:
       escalade: 3.2.0
       picocolors: 1.1.1
 
+  vgpu@0.3.0(supports-color@10.2.2):
+    dependencies:
+      '@vgpu/adapter-mock': 0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))
+      '@vgpu/adapter-node': 0.3.0(supports-color@10.2.2)
+      '@vgpu/core': 0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))
+      '@vgpu/wgsl': 0.3.0(@vgpu/adapter-node@0.3.0(supports-color@10.2.2))
+      '@vgpu/wgsl-std': 0.3.0
+      '@webgpu/types': 0.1.71
+      pixelmatch: 7.2.0
+      pngjs: 7.0.0
+      wgpu-matrix: 3.4.2
+    transitivePeerDependencies:
+      - supports-color
+
   vite-node@3.2.4(jiti@2.7.0)(lightningcss@1.32.0)(supports-color@10.2.2)(yaml@2.9.0):
     dependencies:
       cac: 6.7.14
@@ -2766,6 +2865,15 @@ snapshots:
       - terser
       - tsx
       - yaml
+
+  webgpu@0.4.0(supports-color@10.2.2):
+    dependencies:
+      '@webgpu/types': 0.1.71
+      debug: 4.4.3(supports-color@10.2.2)
+    transitivePeerDependencies:
+      - supports-color
+
+  wgpu-matrix@3.4.2: {}
 
   why-is-node-running@2.3.0:
     dependencies:

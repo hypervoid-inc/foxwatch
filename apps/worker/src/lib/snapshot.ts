@@ -7,7 +7,9 @@ import {
   sanitizeText,
   parseHomepageUrl,
   regionImpact,
+  publicObservers,
   type PublicSnapshot,
+  type PublicObserver,
   type RegionImpact,
   type RegionRunDetail,
 } from "@foxwatch/engine";
@@ -266,6 +268,40 @@ function impactForMonitors(
     }
   }
   return regionImpact(expected, runs) ?? undefined;
+}
+
+function buildPublicObservers(
+  monitors: Array<typeof schema.monitors.$inferSelect>,
+  latest: Array<typeof schema.checkLatest.$inferSelect>,
+  now: number,
+): PublicObserver[] {
+  const expected: string[] = [];
+  const seen = new Set<string>();
+  for (const monitor of monitors) {
+    if (monitor.mutedUntil && monitor.mutedUntil > now) continue;
+    let check: Check;
+    try {
+      check = JSON.parse(monitor.configJson) as Check;
+    } catch {
+      continue;
+    }
+    if (check.type !== "http") continue;
+    for (const region of check.regions) {
+      if (seen.has(region)) continue;
+      seen.add(region);
+      expected.push(region);
+    }
+  }
+  return publicObservers(
+    expected,
+    latest.map((row) => ({
+      region: row.region,
+      outcome: row.outcome,
+      latencyMs: row.latencyMs,
+      colo: row.colo,
+      checkedAt: row.checkedAt,
+    })),
+  );
 }
 
 function monitorPublicStatus(
@@ -550,6 +586,8 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
       note: sanitizeText(window.note, 500),
     }));
 
+  const observers = buildPublicObservers(monitors, latest, now);
+
   return publicSnapshot({
     siteName,
     homepageUrl: settings.homepageUrl,
@@ -560,6 +598,7 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
     generatedAt: now,
     groups,
     maintenance: publicMaintenance,
+    observers,
     incidents,
   });
 }
@@ -582,6 +621,7 @@ export async function readSnapshot(env: Env): Promise<PublicSnapshot> {
     return publicSnapshot({
       ...parsed,
       maintenance: parsed.maintenance ?? [],
+      observers: parsed.observers ?? [],
       incidents: parsed.incidents.map((incident) => ({ ...incident, componentIds: incident.componentIds ?? [] })),
     });
   }

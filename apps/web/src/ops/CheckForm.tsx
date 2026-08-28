@@ -11,7 +11,7 @@ import {
   UNIT_LABEL,
   type DurationUnit,
 } from "./duration.ts";
-import { MAX_TIMEOUT_MS } from "@foxwatch/config";
+import { MAX_REGIONS, MAX_TIMEOUT_MS, REGIONS } from "@foxwatch/config";
 import { regionLabel, regionTitle } from "./labels.ts";
 import { CopyPanel, ErrorText, InfoTip, Mark, Seg, useActionFlash } from "./ui.tsx";
 
@@ -25,7 +25,6 @@ const INTERVALS_HTTP = ["1m", "5m", "10m", "15m", "30m", "60m"] as const;
 const INTERVALS_HB = ["1m", "5m", "10m", "15m"] as const;
 const GRACES = ["30s", "1m", "2m", "5m"] as const;
 const DEFAULT_REGIONS = ["wnam", "weur", "apac"];
-const REGION_IDS = ["wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me"] as const;
 const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
 
 const ASSERTION_OPS = [
@@ -678,16 +677,16 @@ export function CheckForm({
           <div className="check-row check-row-stack">
             <span className="check-row-k" id="check-regions-label">
               Probe from
-              <InfoTip>Regions where probes run. At least 1, up to 8. More regions = fewer false positives.</InfoTip>
+              <InfoTip>Regions where probes run. At least 1. More regions = fewer false positives.</InfoTip>
             </span>
             <div className="region-picks" role="group" aria-labelledby="check-regions-label">
-              {REGION_IDS.map((id) => (
+              {REGIONS.map((id) => (
                 <button
                   key={id}
                   type="button"
                   className="region-chip"
                   aria-pressed={form.regions.includes(id)}
-                  disabled={!form.regions.includes(id) && form.regions.length >= 8}
+                  disabled={!form.regions.includes(id) && form.regions.length >= MAX_REGIONS}
                   title={regionTitle(id)}
                   onClick={() => toggleRegion(id)}
                 >

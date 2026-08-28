@@ -163,9 +163,19 @@ describe("public html", () => {
     expect(html).toContain("No incidents");
     expect(html).toContain('id="live-banner"');
     expect(html).toContain('id="live-systems"');
+    expect(html).toContain('id="live-mesh"');
     expect(html).toContain('id="live-history"');
     expect(html).toContain('new WebSocket');
     expect(html).toContain("/live");
+    expect(html).toContain("/api/here.json");
+    expect(html).toContain('id="globe-stage"');
+    expect(html).toContain('id="globe-land"');
+    expect(html).toContain("__fwGlobe");
+    expect(html).toContain("overflow-x: hidden");
+    expect(html).toMatch(/status-globe\/main\.ts|\/assets\/globe\.js/);
+    expect(html).toContain('type="module"');
+    expect(html).not.toMatch(/jsdelivr|unpkg|cdnjs|cdn\./i);
+    expect(html).not.toContain("From the edge");
     expect(html).not.toMatch(/https?:\/\/example\.com/);
   });
 
@@ -357,6 +367,22 @@ describe("public html", () => {
     expect(live.etag).toBe(a);
     expect(live.banner).toContain("id=\"live-banner\"");
     expect(live.systems).toContain("data-group=\"api\"");
+    expect(live.mesh).toContain('id="live-mesh"');
+    const withObs = snapshotEtag({
+      ...base,
+      observers: [
+        {
+          region: "wnam",
+          label: "West NA",
+          title: "West North America",
+          colo: "SJC",
+          outcome: "pass",
+          latencyMs: 40,
+          checkedAt: 1,
+        },
+      ],
+    });
+    expect(withObs).not.toBe(a);
   });
 });
 
@@ -370,6 +396,7 @@ describe("worker path routing", () => {
     expect(isWorkerPath("/ops/monitors")).toBe(true);
     expect(isWorkerPath("/api/ops/overview")).toBe(true);
     expect(isWorkerPath("/api/status.json")).toBe(true);
+    expect(isWorkerPath("/api/here.json")).toBe(true);
     expect(isWorkerPath("/badge.svg")).toBe(true);
     expect(isWorkerPath("/feed.xml")).toBe(true);
     expect(isWorkerPath("/icon")).toBe(true);
@@ -378,6 +405,8 @@ describe("worker path routing", () => {
     expect(isWorkerPath("/@vite/client")).toBe(false);
     expect(isWorkerPath("/@react-refresh")).toBe(false);
     expect(isWorkerPath("/assets/index.js")).toBe(false);
+    expect(isWorkerPath("/apps/web/src/status-globe/main.ts")).toBe(false);
+    expect(isWorkerPath("/assets/globe.js")).toBe(false);
   });
 });
 
@@ -538,6 +567,7 @@ describe("region impact html", () => {
       incidents: [],
     });
     expect(partial).toContain('class="impact"');
+    expect(partial).toContain('data-region="apac"');
     expect(partial).toContain("APAC");
     expect(partial).toContain("12082ms");
     expect(partial).toContain("East NA");
@@ -589,6 +619,184 @@ describe("region impact html", () => {
     expect(all).toContain("Failing in all regions");
     expect(all).toContain('title="West NA 9000ms · West EU timeout"');
     expect(all).not.toMatch(/class="impact-pill[^"]*">West NA/);
+  });
+});
+
+describe("edge mesh html", () => {
+  it("draws observer nodes and hides the card when there are none", async () => {
+    const { renderPublicHtml, renderLivePayload } = await import("./public-html.ts");
+    const withObs = renderPublicHtml({
+      siteName: "Acme",
+      banner: "fully_operational",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [],
+      observers: [
+        {
+          region: "wnam",
+          label: "West NA",
+          title: "West North America",
+          colo: "SJC",
+          outcome: "pass",
+          latencyMs: 42,
+          checkedAt: 1,
+        },
+        {
+          region: "apac",
+          label: "APAC",
+          title: "Asia Pacific",
+          colo: "SIN",
+          outcome: "degraded",
+          latencyMs: 900,
+          checkedAt: 1,
+        },
+      ],
+    });
+    expect(withObs).toContain("From the edge");
+    expect(withObs).toContain('class="mesh-plot"');
+    expect(withObs).toContain('class="mesh-ocean"');
+    expect(withObs).toContain("color-mix(in srgb, var(--empty) 72%, var(--line) 28%)");
+    expect(withObs).toContain(".mesh-ocean { fill: var(--card); }");
+    expect(withObs).toContain("#live-mesh.mesh { display: none; }");
+    expect(withObs).toContain("--globe-left");
+    expect(withObs).toContain("overflow-y: scroll");
+    expect(withObs).toContain("scrollbar-gutter: stable");
+    expect(withObs).toContain("envelope=1.16");
+    expect(withObs).toContain("--globe-cx");
+    expect(withObs).toContain("--globe-cy");
+    expect(withObs).toContain("globe-focus");
+    expect(withObs).toContain("globe-settle");
+    expect(withObs).toContain("blur(12px)");
+    expect(withObs).toContain("scale(0.97)");
+    expect(withObs).toContain("--duration-enter: 700ms");
+    expect(withObs).toContain("globe-focus var(--duration-enter) linear both");
+    expect(withObs).toContain("__fwRevealGlobe");
+    expect(withObs).toContain("is-ready");
+    expect(withObs).toContain("calc((100% - var(--max)) / 2)");
+    expect(withObs).toContain('class="mesh-node ok has-ring"');
+    expect(withObs).toContain('class="mesh-node warn has-ring"');
+    expect(withObs).toContain('data-region="wnam"');
+    expect(withObs).toContain("West North America · SJC · 42ms");
+    expect(withObs).toContain("1 region degraded");
+    expect(withObs).toContain('class="mesh-arc"');
+    expect(withObs).toContain('class="mesh-you"');
+    expect(withObs).toContain("bindMesh");
+    expect(withObs).toContain('id="globe-stage"');
+    expect(withObs).toContain("canvas.globe-labels");
+    expect(withObs).toContain("z-index: 20");
+    expect(withObs).toContain("inset: 0");
+    expect(withObs).toContain("nearGlobe");
+    expect(withObs).toContain("drawFacets");
+    expect(withObs).toContain("drawTag");
+    expect(withObs).toContain("spinning");
+    expect(withObs).toContain("IDLE_MS=1000");
+    expect(withObs).toContain("SPIN_IN_MS=1200");
+    expect(withObs).toContain("SPIN_OUT_MS=420");
+    expect(withObs).toContain("spinT");
+    expect(withObs).toContain("spinEase");
+    expect(withObs).toContain("strokeHop");
+    expect(withObs).toContain("HOP_STEPS");
+    expect(withObs).toContain('id="globe-land"');
+    expect(withObs).toContain('class="mesh-sr"');
+    expect(withObs).toContain("__fwGlobe");
+    expect(withObs).toContain("__fwPickRegion");
+    expect(withObs).toContain("__fwGpuGlobe");
+    expect(withObs).toContain("fw-globe-gpu");
+    expect(withObs).toContain("fw-globe-fallback");
+    expect(withObs).toMatch(/status-globe\/main\.ts|\/assets\/globe\.js/);
+    expect(withObs).toContain('script type="module"');
+    expect(withObs).not.toMatch(/jsdelivr|unpkg|cdnjs|cdn\./i);
+    expect(withObs).toMatch(/<script type="application\/json" id="globe-land">\[\[/);
+    expect(JSON.parse(withObs.slice(
+      withObs.indexOf(">", withObs.indexOf('id="globe-land"')) + 1,
+      withObs.indexOf("</script>", withObs.indexOf('id="globe-land"')),
+    ))).toEqual(expect.any(Array));
+    expect(renderLivePayload({
+      siteName: "Acme",
+      banner: "fully_operational",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [],
+      observers: [
+        {
+          region: "weur",
+          label: "West EU",
+          title: "West Europe",
+          colo: "LHR",
+          outcome: "pass",
+          latencyMs: 80,
+          checkedAt: 1,
+        },
+      ],
+    }).mesh).toContain("From the edge");
+    const { renderHistoryPage } = await import("./public-html.ts");
+    const history = renderHistoryPage({
+      siteName: "Acme",
+      banner: "fully_operational",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [],
+    });
+    expect(history).not.toContain('id="globe-stage"');
+    expect(history).not.toContain("envelope=1.16");
+    expect(history).not.toContain("status-globe");
+    expect(history).not.toContain("/assets/globe.js");
+  });
+});
+
+describe("public csp", () => {
+  it("allows same-origin globe modules without a CDN or wasm eval", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../app.ts", import.meta.url), "utf8");
+    const match = src.match(/export const PUBLIC_HEADERS = \{[\s\S]*?"content-security-policy":\s*\n\s*"([^"]+)"/);
+    const csp = match?.[1] ?? "";
+    expect(csp).toContain("script-src 'self' 'unsafe-inline'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).not.toContain("wasm-unsafe-eval");
+    expect(csp).not.toMatch(/https?:\/\//);
+    expect(csp).not.toMatch(/cdn|unpkg|jsdelivr/i);
+  });
+});
+
+describe("visitor here", () => {
+  it("reads colo, city, and coords from cf and CF-Ray", async () => {
+    const { visitorFromRequest } = await import("./visitor.ts");
+    const fromHeaders = new Request("https://status.example/", {
+      headers: {
+        "CF-Ray": "8f1a2b3c4d5e6f7a-BOM",
+        "CF-IPCity": "Mumbai",
+        "CF-IPLatitude": "19.076",
+        "CF-IPLongitude": "72.877",
+      },
+    });
+    expect(visitorFromRequest(fromHeaders)).toEqual({
+      colo: "BOM",
+      city: "Mumbai",
+      lat: 19.076,
+      lng: 72.877,
+    });
+
+    const req = new Request("https://status.example/");
+    Object.defineProperty(req, "cf", {
+      value: { colo: "sjc", city: "San Jose", latitude: "37.336", longitude: "-121.89" },
+    });
+    expect(visitorFromRequest(req)).toEqual({
+      colo: "SJC",
+      city: "San Jose",
+      lat: 37.336,
+      lng: -121.89,
+    });
+
+    const junk = new Request("https://status.example/", {
+      headers: { "CF-Ray": "not-a-ray", "CF-IPLatitude": "999", "CF-IPLongitude": "1" },
+    });
+    expect(visitorFromRequest(junk)).toEqual({ colo: null, city: null, lat: null, lng: 1 });
   });
 });
 
