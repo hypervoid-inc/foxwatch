@@ -1,6 +1,6 @@
 import type { ComponentStatus } from "@foxwatch/config";
-import type { PublicComponent, PublicSnapshot } from "@foxwatch/engine";
-import { escapeHtml, statusDotColor } from "@foxwatch/engine";
+import type { PublicComponent, PublicSnapshot, RegionImpact } from "@foxwatch/engine";
+import { escapeHtml, impactAriaLabel, impactTitle, impactTone, statusDotColor } from "@foxwatch/engine";
 
 type PublicDay = PublicComponent["days"][number];
 type PublicIncident = PublicSnapshot["incidents"][number];
@@ -284,6 +284,20 @@ function maintLabel(status: ComponentStatus): string {
   return status === "maintenance" ? `<span class="maint-label">Under maintenance</span>` : "";
 }
 
+function renderImpact(impact: RegionImpact | undefined): string {
+  if (!impact?.items.length) return "";
+  const tone = impactTone(impact);
+  const pills = impact.all
+    ? `<li><span class="impact-pill ${tone}" title="${escapeHtml(impactTitle(impact))}">All</span></li>`
+    : impact.items
+        .map((item) => {
+          const kind = item.outcome === "fail" ? "bad" : "warn";
+          return `<li><span class="impact-pill ${kind}">${escapeHtml(item.label)} <span class="impact-detail">${escapeHtml(item.detail)}</span></span></li>`;
+        })
+        .join("");
+  return `<ul class="impact" aria-label="${escapeHtml(impactAriaLabel(impact))}">${pills}</ul>`;
+}
+
 function renderService(group: PublicSnapshot["groups"][number]): string {
   const expandable = group.components.length > 1;
   const status = groupStatus(group.components);
@@ -297,6 +311,7 @@ function renderService(group: PublicSnapshot["groups"][number]): string {
           <div class="svc-label">
             ${mark(c.status)}
             <span class="name">${escapeHtml(c.name)}</span>
+            ${renderImpact(c.impact)}
             ${maintLabel(c.status)}
           </div>
           <span class="uptime">${escapeHtml(pct(c.uptime90))}<span class="uptime-word"> uptime</span></span>
@@ -310,7 +325,7 @@ function renderService(group: PublicSnapshot["groups"][number]): string {
     ? `<svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`
     : "";
   const countEl = expandable ? `<span class="count">${escapeHtml(count)}</span>` : "";
-  const label = `<span class="svc-label">${mark(status)}<span class="name">${escapeHtml(group.name)}</span>${maintLabel(status)}${countEl}${chev}</span>`;
+  const label = `<div class="svc-label">${mark(status)}<span class="name">${escapeHtml(group.name)}</span>${renderImpact(group.impact)}${maintLabel(status)}${countEl}${chev}</div>`;
   const uptime = `<span class="uptime">${escapeHtml(pct(group.uptime90))}<span class="uptime-word"> uptime</span></span>`;
   const bar = renderBar(days, `${group.name} 90-day history, ${pct(group.uptime90)} uptime`, expandable ? "group-bar" : "");
   if (!expandable) {
@@ -624,9 +639,19 @@ html[data-theme="dark"] .theme-icon-sun { opacity: 1; transform: rotate(0deg); }
 .service summary::-webkit-details-marker { display: none; }
 .service summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
 .svc-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem; }
-.svc-label { display: flex; align-items: center; gap: 0.5rem; min-width: 0; cursor: default; }
+.svc-label { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem 0.5rem; min-width: 0; flex: 1 1 auto; cursor: default; }
 summary .svc-label { cursor: pointer; }
-.name { font-weight: 600; font-size: 0.925rem; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name { font-weight: 600; font-size: 0.925rem; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+.impact { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.impact-pill {
+  display: inline-flex; align-items: baseline; gap: 0.28rem;
+  font-size: 0.6875rem; font-weight: 600; line-height: 1.3;
+  padding: 0.12rem 0.4rem; border-radius: 999px; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.impact-pill.warn { background: var(--warn-bg); color: var(--warn-ink); }
+.impact-pill.bad { background: var(--bad-bg); color: var(--bad-ink); }
+.impact-detail { font-weight: 500; opacity: 0.82; }
 .maint-label { color: var(--warn-ink); font-size: 0.75rem; font-weight: 600; flex: none; }
 .count { color: var(--muted); font-size: 0.8rem; font-weight: 400; flex: none; }
 .chev { width: 0.7rem; height: 0.7rem; flex: none; color: var(--muted); transition: transform var(--duration-ui) var(--ease-out); }

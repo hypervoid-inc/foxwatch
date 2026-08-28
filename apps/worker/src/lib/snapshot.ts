@@ -1,7 +1,16 @@
 import { drizzle } from "drizzle-orm/d1";
 import { desc, eq, gte, inArray, isNull, or } from "drizzle-orm";
 import type { BannerStatus, Check, ComponentStatus } from "@foxwatch/config";
-import { bannerStatus, publicSnapshot, sanitizeText, parseHomepageUrl, type PublicSnapshot } from "@foxwatch/engine";
+import {
+  bannerStatus,
+  publicSnapshot,
+  sanitizeText,
+  parseHomepageUrl,
+  regionImpact,
+  type PublicSnapshot,
+  type RegionImpact,
+  type RegionRunDetail,
+} from "@foxwatch/engine";
 import type { Env } from "../env.ts";
 import * as schema from "../db/schema.ts";
 import { renderLivePayload } from "./public-html.ts";
@@ -199,7 +208,7 @@ export async function isStale(env: Env, now = Date.now()): Promise<{ stale: bool
     const lastTick = latest.reduce<number | null>((max, row) => max == null || row.checkedAt > max ? row.checkedAt : max, null);
     const stale = active.some((monitor) => {
       const check = JSON.parse(monitor.configJson) as Check;
-      const expected = check.type === "heartbeat" ? ["global"] : check.regions;
+      const expected = monitorExpectedRegions(check);
       const freshAfter = now - monitorFreshnessMs(check);
       const seen = new Set(
         latest
@@ -219,6 +228,46 @@ export function monitorFreshnessMs(check: Check): number {
   return Math.max(check.intervalMs * 2.5, check.intervalMs + attemptBudget + 30_000);
 }
 
+function monitorExpectedRegions(check: Check): string[] {
+  return check.type === "heartbeat" ? ["global"] : check.regions;
+}
+
+function impactForMonitors(
+  monitors: Array<typeof schema.monitors.$inferSelect>,
+  latest: Array<typeof schema.checkLatest.$inferSelect>,
+  now: number,
+): RegionImpact | undefined {
+  const expected: string[] = [];
+  const seen = new Set<string>();
+  const runs: RegionRunDetail[] = [];
+  for (const monitor of monitors) {
+    if (monitor.mutedUntil && monitor.mutedUntil > now) continue;
+    let check: Check;
+    try {
+      check = JSON.parse(monitor.configJson) as Check;
+    } catch {
+      continue;
+    }
+    for (const region of monitorExpectedRegions(check)) {
+      if (seen.has(region)) continue;
+      seen.add(region);
+      expected.push(region);
+    }
+    const freshAfter = now - monitorFreshnessMs(check);
+    for (const row of latest) {
+      if (row.monitorId !== monitor.id || row.checkedAt < freshAfter) continue;
+      runs.push({
+        region: row.region,
+        outcome: row.outcome,
+        latencyMs: row.latencyMs,
+        errorClass: row.errorClass,
+        statusCode: row.statusCode,
+      });
+    }
+  }
+  return regionImpact(expected, runs) ?? undefined;
+}
+
 function monitorPublicStatus(
   monitor: typeof schema.monitors.$inferSelect,
   latest: Array<typeof schema.checkLatest.$inferSelect>,
@@ -231,7 +280,7 @@ function monitorPublicStatus(
   } catch {
     return "unknown";
   }
-  const expected = check.type === "heartbeat" ? ["global"] : check.regions;
+  const expected = monitorExpectedRegions(check);
   const freshAfter = now - monitorFreshnessMs(check);
   const seen = new Set(
     latest.filter((row) => row.monitorId === monitor.id && row.checkedAt >= freshAfter).map((row) => row.region),
@@ -392,6 +441,7 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
         status,
         uptime90: observed ? available / observed : null,
         days,
+        impact: status === "degraded" || status === "failing" ? impactForMonitors(activeMons, latest, now) : undefined,
       };
     });
     const groupComponentIds = new Set(components.map((component) => component.id));
@@ -452,6 +502,13 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
       name: g.name,
       uptime90: groupObserved ? groupAvailable / groupObserved : null,
       days: groupDays,
+      impact: components.some((component) => component.status === "degraded" || component.status === "failing")
+        ? impactForMonitors(
+            [...g.components.values()].flat().filter((monitor) => !monitor.mutedUntil || monitor.mutedUntil <= now),
+            latest,
+            now,
+          )
+        : undefined,
       components,
     };
   });

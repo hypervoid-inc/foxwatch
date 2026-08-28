@@ -26,39 +26,7 @@ export function outcomeLabel(outcome: string): string {
   return outcome;
 }
 
-const REGION_LABELS: Record<string, string> = {
-  wnam: "West NA",
-  enam: "East NA",
-  weur: "West EU",
-  eeur: "East EU",
-  apac: "APAC",
-  oc: "Oceania",
-  sam: "S. America",
-  afr: "Africa",
-  me: "Middle East",
-  global: "Global",
-};
-
-const REGION_TITLES: Record<string, string> = {
-  wnam: "West North America",
-  enam: "East North America",
-  weur: "West Europe",
-  eeur: "East Europe",
-  apac: "Asia Pacific",
-  oc: "Oceania",
-  sam: "South America",
-  afr: "Africa",
-  me: "Middle East",
-  global: "Global",
-};
-
-export function regionLabel(region: string): string {
-  return REGION_LABELS[region] ?? region;
-}
-
-export function regionTitle(region: string): string {
-  return REGION_TITLES[region] ?? region;
-}
+export { regionLabel, regionTitle } from "@foxwatch/engine";
 
 export function incidentStatusLabel(status: string): string {
   if (status === "investigating") return "Investigating";

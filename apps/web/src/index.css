@@ -1231,6 +1231,7 @@ textarea.input-code {
 
 .check-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
   min-width: 0;
@@ -1243,6 +1244,45 @@ textarea.input-code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 0 1 auto;
+}
+
+.check-impact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.check-impact-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.28rem;
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 1.3;
+  padding: 0.08rem 0.35rem;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.check-impact-pill.warn {
+  background: var(--color-warn-bg);
+  color: var(--color-warn-ink);
+}
+
+.check-impact-pill.bad {
+  background: var(--color-bad-bg);
+  color: var(--color-bad-ink);
+}
+
+.check-impact-detail {
+  font-weight: 500;
+  opacity: 0.82;
 }
 
 .check-flag {

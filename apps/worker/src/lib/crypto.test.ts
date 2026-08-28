@@ -68,6 +68,54 @@ describe("public snapshot shape", () => {
     expect(snap.homepageUrl).toBe("https://construct.com/");
     expect(snap.iconUrl).toBe("/icon?v=1");
   });
+
+  it("copies region impact onto the public snapshot", () => {
+    const snap = publicSnapshot({
+      siteName: "Acme",
+      homepageUrl: null,
+      iconUrl: null,
+      banner: "degraded",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [
+        {
+          id: "g",
+          name: "Inference Gateway",
+          uptime90: 1,
+          impact: {
+            all: false,
+            items: [
+              { region: "apac", label: "APAC", detail: "12082ms", outcome: "degraded" },
+              { region: "enam", label: "East NA", detail: "11920ms", outcome: "degraded" },
+            ],
+          },
+          components: [
+            {
+              id: "c",
+              name: "Inference Gateway",
+              groupId: "g",
+              groupName: "Inference Gateway",
+              status: "degraded",
+              uptime90: 1,
+              days: [],
+              impact: {
+                all: false,
+                items: [{ region: "apac", label: "APAC", detail: "12082ms", outcome: "degraded" }],
+              },
+            },
+          ],
+        },
+      ],
+      incidents: [],
+    });
+    expect(snap.groups[0]?.impact?.all).toBe(false);
+    expect(snap.groups[0]?.impact?.items).toEqual([
+      { region: "apac", label: "APAC", detail: "12082ms", outcome: "degraded" },
+      { region: "enam", label: "East NA", detail: "11920ms", outcome: "degraded" },
+    ]);
+    expect(snap.groups[0]?.components[0]?.impact?.items[0]?.detail).toBe("12082ms");
+  });
 });
 
 describe("public html", () => {
@@ -432,6 +480,115 @@ describe("public brand", () => {
     expect(html).toContain("#e11d48");
     expect(html).toContain("#d97706");
     expect(renderLivePayload(snap).status).toBe("failing");
+  });
+});
+
+describe("region impact html", () => {
+  it("renders pills for impacted regions and All when every region is down", async () => {
+    const { renderPublicHtml } = await import("./public-html.ts");
+    const days = [
+      {
+        date: "2026-08-10",
+        uptime: 1,
+        incident: false,
+        checks: 1,
+        latencyMs: 100,
+        latencyMinMs: 100,
+        latencyMaxMs: 100,
+      },
+    ];
+    const partial = renderPublicHtml({
+      siteName: "Acme",
+      banner: "degraded",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [
+        {
+          id: "gw",
+          name: "Inference Gateway",
+          uptime90: 1,
+          impact: {
+            all: false,
+            items: [
+              { region: "apac", label: "APAC", detail: "12082ms", outcome: "degraded" },
+              { region: "enam", label: "East NA", detail: "11920ms", outcome: "degraded" },
+            ],
+          },
+          components: [
+            {
+              id: "gw",
+              name: "Inference Gateway",
+              groupId: "gw",
+              groupName: "Inference Gateway",
+              status: "degraded",
+              uptime90: 1,
+              days,
+              impact: {
+                all: false,
+                items: [
+                  { region: "apac", label: "APAC", detail: "12082ms", outcome: "degraded" },
+                  { region: "enam", label: "East NA", detail: "11920ms", outcome: "degraded" },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+      incidents: [],
+    });
+    expect(partial).toContain('class="impact"');
+    expect(partial).toContain("APAC");
+    expect(partial).toContain("12082ms");
+    expect(partial).toContain("East NA");
+    expect(partial).toContain("11920ms");
+    expect(partial).toContain("Degraded in APAC 12082ms, East NA 11920ms");
+    expect(partial).not.toContain(">All<");
+
+    const all = renderPublicHtml({
+      siteName: "Acme",
+      banner: "degraded",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [
+        {
+          id: "gw",
+          name: "Inference Gateway",
+          uptime90: 1,
+          impact: {
+            all: true,
+            items: [
+              { region: "wnam", label: "West NA", detail: "9000ms", outcome: "degraded" },
+              { region: "weur", label: "West EU", detail: "timeout", outcome: "fail" },
+            ],
+          },
+          components: [
+            {
+              id: "gw",
+              name: "Inference Gateway",
+              groupId: "gw",
+              groupName: "Inference Gateway",
+              status: "failing",
+              uptime90: 1,
+              days,
+              impact: {
+                all: true,
+                items: [
+                  { region: "wnam", label: "West NA", detail: "9000ms", outcome: "degraded" },
+                  { region: "weur", label: "West EU", detail: "timeout", outcome: "fail" },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+      incidents: [],
+    });
+    expect(all).toContain(">All<");
+    expect(all).toContain("Failing in all regions");
+    expect(all).toContain('title="West NA 9000ms · West EU timeout"');
+    expect(all).not.toMatch(/class="impact-pill[^"]*">West NA/);
   });
 });
 

@@ -27,6 +27,7 @@ import { renderBadge, renderFeed, renderHistoryPage, renderLivePayload, renderPu
 import { sha256Hex, randomToken, newId } from "./lib/crypto.ts";
 import { auditPageFromRows, parseAuditCursor, parseAuditLimit } from "./lib/audit-page.ts";
 import { monitorStub } from "./do/monitor.ts";
+import { sampleMonitors } from "./lib/samples.ts";
 import { deliverAlert } from "./lib/alerts.ts";
 import { loadSecretMap } from "./lib/secret-store.ts";
 import { canManageWorkerSecrets, putWorkerSecret, WorkerSecretError } from "./lib/worker-secrets.ts";
@@ -609,6 +610,59 @@ app.post("/api/ops/monitors", async (c) => {
   await audit(c.env, actorOf(c), "create-monitor", id);
   await publishSnapshot(c.env);
   return c.json({ ok: true, id });
+});
+
+app.post("/api/ops/samples", async (c) => {
+  const db = drizzle(c.env.DB, { schema });
+  const samples = sampleMonitors();
+  const existing = new Set((await db.select({ id: schema.monitors.id }).from(schema.monitors)).map((row) => row.id));
+  const missing = samples.filter((sample) => !existing.has(sample.id));
+  if (existing.size + missing.length > MAX_MONITORS) return fail(c, 400, "quota");
+  const now = Date.now();
+  for (const sample of missing) {
+    if (sample.check.type === "http") {
+      try {
+        assertSafeUrl(sample.check.url, { allowHttpLocal: allowHttpLocal(c.env) });
+      } catch (err) {
+        return failFromUnknown(c, err);
+      }
+    }
+  }
+  for (const sample of missing) {
+    await db.insert(schema.monitors).values({
+      id: sample.id,
+      origin: "ui",
+      drifted: 0,
+      type: sample.check.type,
+      name: sample.name,
+      groupId: sample.groupId,
+      groupName: sample.groupName,
+      componentId: sample.componentId,
+      componentName: sample.componentName,
+      critical: sample.critical ? 1 : 0,
+      configJson: JSON.stringify(sample.check),
+      mutedUntil: null,
+      consecutiveFails: 0,
+      confirmedOutcome: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    try {
+      await monitorStub(c.env, sample.id).reschedule(1);
+    } catch {
+      /* alarm is best-effort; Run still works from Checks */
+    }
+  }
+  await audit(c.env, actorOf(c), "populate-samples", undefined, {
+    created: missing.map((sample) => sample.id),
+    skipped: samples.filter((sample) => existing.has(sample.id)).map((sample) => sample.id),
+  });
+  await publishSnapshot(c.env);
+  return c.json({
+    ok: true,
+    created: missing.map((sample) => sample.id),
+    skipped: samples.filter((sample) => existing.has(sample.id)).map((sample) => sample.id),
+  });
 });
 
 app.patch("/api/ops/monitors/:id", async (c) => {

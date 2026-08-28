@@ -5,6 +5,7 @@ import {
   bannerStatus,
   componentStatus,
   confirmFlip,
+  regionImpact,
   statusDotColor,
   evaluateHttp,
   heartbeatOutcome,
@@ -14,6 +15,7 @@ import {
   runHttpProbe,
   stripForbiddenHeaders,
   UrlPolicyError,
+  DEFAULT_PROBE_USER_AGENT,
 } from "./index.ts";
 
 describe("url policy", () => {
@@ -139,6 +141,48 @@ describe("http eval", () => {
 });
 
 describe("runHttpProbe redirects", () => {
+  it("sends a User-Agent when the check does not set one", async () => {
+    const seen: string[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      seen.push(new Headers(init?.headers).get("User-Agent") ?? "");
+      return new Response("", { status: 200 });
+    };
+    const check = http("homepage", {
+      url: "https://httpbingo.org/status/200",
+      timeout: "5s",
+      interval: "1m",
+    });
+    const result = await runHttpProbe(check, {
+      secrets: {},
+      allowHttpLocal: false,
+      fetchImpl,
+      colo: "DEL",
+    });
+    expect(result.outcome).toBe("pass");
+    expect(seen).toEqual([DEFAULT_PROBE_USER_AGENT]);
+  });
+
+  it("keeps an explicit User-Agent", async () => {
+    const seen: string[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      seen.push(new Headers(init?.headers).get("User-Agent") ?? "");
+      return new Response("", { status: 200 });
+    };
+    const check = http("homepage", {
+      url: "https://example.com/health",
+      headers: { "User-Agent": "StatusBot/2" },
+      timeout: "5s",
+      interval: "1m",
+    });
+    await runHttpProbe(check, {
+      secrets: {},
+      allowHttpLocal: false,
+      fetchImpl,
+      colo: "SFO",
+    });
+    expect(seen).toEqual(["StatusBot/2"]);
+  });
+
   it("strips secret headers when the redirect leaves allowedHosts", async () => {
     const seen: Array<{ url: string; auth?: string }> = [];
     const fetchImpl: typeof fetch = async (input, init) => {
@@ -204,5 +248,60 @@ describe("status math", () => {
     expect(confirmFlip(2, "fail", 3).confirmedFail).toBe(true);
     expect(heartbeatOutcome(Date.now() - 1000, Date.now(), 60_000, 5_000)).toBe("pass");
     expect(heartbeatOutcome(null, Date.now(), 60_000, 5_000)).toBe("fail");
+  });
+});
+
+describe("region impact", () => {
+  it("lists degraded regions with latency and collapses to all", () => {
+    const partial = regionImpact(
+      ["wnam", "weur", "apac", "enam"],
+      [
+        { region: "apac", outcome: "degraded", latencyMs: 12082, errorClass: "latency" },
+        { region: "weur", outcome: "pass", latencyMs: 4687 },
+        { region: "enam", outcome: "degraded", latencyMs: 11920, errorClass: "latency" },
+        { region: "wnam", outcome: "pass", latencyMs: 5369 },
+      ],
+    );
+    expect(partial).toEqual({
+      all: false,
+      items: [
+        { region: "apac", label: "APAC", detail: "12082ms", outcome: "degraded" },
+        { region: "enam", label: "East NA", detail: "11920ms", outcome: "degraded" },
+      ],
+    });
+
+    const all = regionImpact(
+      ["wnam", "weur"],
+      [
+        { region: "wnam", outcome: "degraded", latencyMs: 9000 },
+        { region: "weur", outcome: "fail", errorClass: "timeout", latencyMs: 10_000 },
+      ],
+    );
+    expect(all?.all).toBe(true);
+    expect(all?.items.map((item) => item.region)).toEqual(["wnam", "weur"]);
+    expect(all?.items[1]?.detail).toBe("timeout");
+  });
+
+  it("keeps a single-region failure as a pill, not all", () => {
+    expect(regionImpact(["global"], [{ region: "global", outcome: "fail", errorClass: "heartbeat" }])).toEqual({
+      all: false,
+      items: [{ region: "global", label: "Global", detail: "missed", outcome: "fail" }],
+    });
+    expect(regionImpact(["wnam"], [{ region: "wnam", outcome: "pass", latencyMs: 20 }])).toBe(null);
+    expect(
+      regionImpact(["wnam"], [{ region: "wnam", outcome: "fail", errorClass: "status", statusCode: 503 }])?.items[0]
+        ?.detail,
+    ).toBe("HTTP 503");
+  });
+
+  it("keeps the worse of two runs in the same region", () => {
+    const impact = regionImpact(
+      ["apac"],
+      [
+        { region: "apac", outcome: "degraded", latencyMs: 8000, errorClass: "latency" },
+        { region: "apac", outcome: "fail", errorClass: "timeout", latencyMs: 10_000 },
+      ],
+    );
+    expect(impact?.items[0]).toMatchObject({ outcome: "fail", detail: "timeout" });
   });
 });

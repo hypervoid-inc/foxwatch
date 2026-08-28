@@ -16,6 +16,13 @@ export type ProbeResult = {
 };
 
 const TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace";
+/** Workers omit User-Agent; hosts like httpbingo.org reject the empty header with 402. */
+export const DEFAULT_PROBE_USER_AGENT = "Foxwatch/0.1";
+
+function ensureUserAgent(headers: Record<string, string>): Record<string, string> {
+  if (Object.keys(headers).some((key) => key.toLowerCase() === "user-agent")) return headers;
+  return { ...headers, "User-Agent": DEFAULT_PROBE_USER_AGENT };
+}
 
 async function readBody(res: Response): Promise<string> {
   const reader = res.body?.getReader();
@@ -113,6 +120,7 @@ export async function runHttpProbe(
       errorClass: "missing_secret",
     };
   }
+  headersForHop = { headers: ensureUserAgent(headersForHop.headers) };
 
   let last: Response | null = null;
   const requestController = new AbortController();
@@ -157,6 +165,7 @@ export async function runHttpProbe(
           current.hostname,
           check.allowedHosts,
         );
+        headersForHop = { headers: ensureUserAgent(headersForHop.headers) };
         continue;
       }
       break;

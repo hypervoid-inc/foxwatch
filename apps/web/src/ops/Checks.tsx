@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { impactAriaLabel, impactTitle, impactTone, regionImpact } from "@foxwatch/engine";
 import { api } from "./api.ts";
 import { CheckForm, type Monitor } from "./CheckForm.tsx";
 import { outcomeLabel, outcomeMark, regionLabel, regionTitle } from "./labels.ts";
@@ -118,6 +119,7 @@ export function Checks({
               const freshAfter = Date.now() - Math.max(interval * 2.5, interval + timeout + 30_000);
               const freshLatest = m.latest.filter((latest) => latest.checkedAt >= freshAfter);
               const muted = m.mutedUntil != null && m.mutedUntil > Date.now();
+              const expected = m.type === "heartbeat" ? ["global"] : Array.isArray(m.config.regions) ? m.config.regions.map(String) : [];
               const worst = muted ? "empty" : freshLatest.some((l) => l.outcome === "fail") ? "bad" : freshLatest.some((l) => l.outcome === "degraded") ? "warn" : freshLatest.length ? "ok" : "empty";
               const confirming = freshLatest.some((latest) => latest.outcome === "fail") && m.confirmedOutcome !== "fail";
               const isSelected = selected === m.id;
@@ -136,15 +138,16 @@ export function Checks({
                       onClick={() => setSelected(m.id)}
                       title={[m.type === "http" ? String(m.config.url ?? "") : "Heartbeat", `${m.groupName} / ${m.componentName}`].join(" · ")}
                     >
-                      <p className="check-title">
+                      <div className="check-title">
                         <Mark status={worst} />
                         <span className="check-title-text">{m.name}</span>
+                        {muted ? null : <ImpactPills expected={expected} latest={freshLatest} />}
                         {muted ? <span className="check-flag">Muted</span> : null}
                         {m.drifted ? <span className="check-flag">Drifted</span> : null}
                         {m.origin === "git" ? <span className="check-flag">Imported</span> : null}
                         {m.latest.length > 0 && freshLatest.length === 0 ? <span className="check-flag">Stale</span> : null}
                         {confirming ? <span className="check-flag">Confirming {m.consecutiveFails ?? 0}/{Number(m.config.confirmFails ?? 3)}</span> : null}
-                      </p>
+                      </div>
                       <p className="check-target">
                         {m.type === "http" ? (
                           <>
@@ -230,6 +233,31 @@ export function Checks({
         }}
       />
     </div>
+  );
+}
+
+function ImpactPills({ expected, latest }: { expected: string[]; latest: Latest[] }) {
+  const impact = regionImpact(expected, latest);
+  if (!impact) return null;
+  const tone = impactTone(impact);
+  return (
+    <ul className="check-impact" aria-label={impactAriaLabel(impact)}>
+      {impact.all ? (
+        <li>
+          <span className={`check-impact-pill ${tone}`} title={impactTitle(impact)}>
+            All
+          </span>
+        </li>
+      ) : (
+        impact.items.map((item) => (
+          <li key={item.region}>
+            <span className={`check-impact-pill ${item.outcome === "fail" ? "bad" : "warn"}`}>
+              {item.label} <span className="check-impact-detail">{item.detail}</span>
+            </span>
+          </li>
+        ))
+      )}
+    </ul>
   );
 }
 

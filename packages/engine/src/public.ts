@@ -1,4 +1,6 @@
 import type { BannerStatus, ComponentStatus } from "@foxwatch/config";
+import type { RegionImpact } from "./regions.ts";
+import { sanitizeText } from "./sanitize.ts";
 
 export type PublicDay = {
   date: string;
@@ -21,6 +23,8 @@ export type PublicComponent = {
   status: ComponentStatus;
   uptime90: number | null;
   days: PublicDay[];
+  /** Present when the component is degraded or failing in some probe regions. */
+  impact?: RegionImpact;
 };
 
 export type PublicIncident = {
@@ -60,11 +64,26 @@ export type PublicSnapshot = {
     uptime90: number | null;
     /** Group-level history. Uses the union of child outages, so disjoint failures are not understated. */
     days?: PublicDay[];
+    /** Union of child probe impact when the group itself is degraded or failing. */
+    impact?: RegionImpact;
     components: PublicComponent[];
   }>;
   maintenance: PublicMaintenance[];
   incidents: PublicIncident[];
 };
+
+function copyImpact(impact?: RegionImpact | null): RegionImpact | undefined {
+  if (!impact?.items.length) return undefined;
+  return {
+    all: Boolean(impact.all),
+    items: impact.items.map((item) => ({
+      region: sanitizeText(item.region, 16),
+      label: sanitizeText(item.label, 40),
+      detail: sanitizeText(item.detail, 40),
+      outcome: item.outcome === "fail" ? "fail" : "degraded",
+    })),
+  };
+}
 
 export function publicSnapshot(input: PublicSnapshot): PublicSnapshot {
   return {
@@ -80,6 +99,7 @@ export function publicSnapshot(input: PublicSnapshot): PublicSnapshot {
       name: g.name,
       uptime90: g.uptime90,
       days: g.days?.map((day) => ({ ...day })),
+      impact: copyImpact(g.impact),
       components: g.components.map((c) => ({
         id: c.id,
         name: c.name,
@@ -88,6 +108,7 @@ export function publicSnapshot(input: PublicSnapshot): PublicSnapshot {
         status: c.status,
         uptime90: c.uptime90,
         days: c.days,
+        impact: copyImpact(c.impact),
       })),
     })),
     maintenance: (input.maintenance ?? []).map((window) => ({ ...window })),

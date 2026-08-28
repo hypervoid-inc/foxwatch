@@ -35,6 +35,9 @@ export function Settings({
   const [pending, setPending] = useState(false);
   const [secretBusy, setSecretBusy] = useState(false);
   const [iconBusy, setIconBusy] = useState(false);
+  const [sampleBusy, setSampleBusy] = useState(false);
+  const [pendingSamples, setPendingSamples] = useState(false);
+  const [sampleNote, setSampleNote] = useState<string | null>(null);
   const { flash, flashOk } = useActionFlash();
 
   async function refresh() {
@@ -157,6 +160,27 @@ export function Settings({
       return;
     }
     setIconUrl(null);
+    await onChange();
+  }
+
+  async function populateSamples() {
+    setError(null);
+    setSampleNote(null);
+    setSampleBusy(true);
+    const res = await api<{ created: string[]; skipped: string[] }>("/api/ops/samples", { method: "POST", body: "{}" });
+    setSampleBusy(false);
+    setPendingSamples(false);
+    if (!res.ok) {
+      setError(res.error);
+      return;
+    }
+    if (res.data.created.length) {
+      setSampleNote(
+        `Added ${res.data.created.length} sample check${res.data.created.length === 1 ? "" : "s"}. Open Checks or the public page — probes start on their own.`,
+      );
+    } else {
+      setSampleNote("Sample checks are already on this instance.");
+    }
     await onChange();
   }
 
@@ -335,6 +359,32 @@ export function Settings({
         </section>
 
         <AlertChannels secrets={secrets} onSecretsChange={refresh} />
+      </div>
+
+      <div className="settings-row">
+        <section className="card set-card">
+          <div className="set-card-head">
+            <h2 className="section-title">Sample checks</h2>
+            <p className="section-copy">
+              Adds httpbingo.org checks for operational, slow, timeout, and error responses. They appear on the public page. Safe to run twice — existing samples are skipped.
+            </p>
+          </div>
+          {sampleNote ? <p className="set-empty">{sampleNote}</p> : null}
+          <div className="check-form-actions">
+            <button className="btn btn-primary" type="button" disabled={sampleBusy} onClick={() => setPendingSamples(true)}>
+              {sampleBusy ? "Adding…" : "Populate samples"}
+            </button>
+          </div>
+          <ConfirmDialog
+            open={pendingSamples}
+            title="Add sample checks?"
+            body="This creates demo monitors against httpbingo.org (200, delay, 401, 503, POST). They show on the public status page. Existing sample checks are left as-is."
+            confirmLabel="Populate samples"
+            pending={sampleBusy}
+            onCancel={() => setPendingSamples(false)}
+            onConfirm={() => void populateSamples()}
+          />
+        </section>
       </div>
     </div>
   );

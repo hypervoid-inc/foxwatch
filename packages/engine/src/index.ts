@@ -17,4 +17,15 @@ export {
 } from "./status.ts";
 export { sanitizeText, escapeHtml, escapeXml } from "./sanitize.ts";
 export { publicSnapshot, type PublicSnapshot, type PublicComponent, type PublicDay } from "./public.ts";
-export { runHttpProbe, parseColo, type ProbeResult } from "./run-http.ts";
+export {
+  regionImpact,
+  regionLabel,
+  regionTitle,
+  impactTone,
+  impactAriaLabel,
+  impactTitle,
+  type RegionImpact,
+  type RegionImpactItem,
+  type RegionRunDetail,
+} from "./regions.ts";
+export { runHttpProbe, parseColo, DEFAULT_PROBE_USER_AGENT, type ProbeResult } from "./run-http.ts";
