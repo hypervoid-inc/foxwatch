@@ -4,6 +4,7 @@ import {
   convertDuration,
   durationMs,
   maxAmount,
+  parseDurationToken,
   sanitizeInt,
   splitDuration,
   unitsForCap,
@@ -14,12 +15,17 @@ describe("duration field", () => {
     expect(splitDuration(10_000)).toEqual({ value: "10", unit: "s" });
     expect(splitDuration(8_500)).toEqual({ value: "8500", unit: "ms" });
     expect(splitDuration(120_000)).toEqual({ value: "2", unit: "m" });
+    expect(splitDuration(14_400_000)).toEqual({ value: "4", unit: "h" });
   });
 
   it("only accepts whole numbers times a unit", () => {
     expect(durationMs("10", "s")).toBe(10_000);
     expect(durationMs("1", "m")).toBe(60_000);
+    expect(durationMs("4", "h")).toBe(14_400_000);
     expect(durationMs("0", "s")).toBeNull();
+    expect(parseDurationToken("4h")).toBe(14_400_000);
+    expect(parseDurationToken("60s")).toBe(60_000);
+    expect(parseDurationToken("4 hours")).toBeNull();
     expect(durationMs("10s", "s")).toBeNull();
     expect(durationMs("1e3", "ms")).toBeNull();
     expect(durationMs("-2", "s")).toBeNull();
@@ -29,6 +35,7 @@ describe("duration field", () => {
   it("hides units that cannot fit the cap", () => {
     expect(unitsForCap(15_000)).toEqual(["ms", "s"]);
     expect(unitsForCap(60_000)).toEqual(["ms", "s", "m"]);
+    expect(unitsForCap(3_600_000)).toEqual(["ms", "s", "m", "h"]);
     expect(maxAmount("m", 15_000)).toBe(0);
   });
 

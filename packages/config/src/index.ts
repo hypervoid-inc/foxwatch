@@ -14,7 +14,8 @@ export type Region = (typeof REGIONS)[number];
 
 export const MAX_MONITORS = 100;
 export const MIN_INTERVAL_MS = 30_000;
-export const MAX_TIMEOUT_MS = 30_000;
+export const MAX_INTERVAL_MS = 24 * 60 * 60 * 1000;
+export const MAX_TIMEOUT_MS = 60_000;
 export const MAX_REGIONS = REGIONS.length;
 export const DEFAULT_TIMEOUT_MS = 10_000;
 export const DEFAULT_RETRIES = 2;
@@ -185,7 +186,7 @@ function parseDuration(input: string | number, field: string): number {
     return input;
   }
   const m = /^(\d+)(ms|s|m|h)$/.exec(input.trim());
-  if (!m) throw new Error(`${field} must look like 30s, 1m, or 10m`);
+  if (!m) throw new Error(`${field} must look like 30s, 10m, or 4h`);
   const n = Number(m[1]);
   const unit = m[2];
   const ms = unit === "ms" ? n : unit === "s" ? n * 1000 : unit === "m" ? n * 60_000 : n * 3_600_000;
@@ -298,8 +299,8 @@ export type DefineConfigInput = {
 
 function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackRegions: Region[]): Check {
   if (check.type === "heartbeat") {
-    if (check.intervalMs < MIN_INTERVAL_MS) {
-      throw new Error(`check ${check.id} interval must be >= ${MIN_INTERVAL_MS}ms`);
+    if (check.intervalMs < MIN_INTERVAL_MS || check.intervalMs > MAX_INTERVAL_MS) {
+      throw new Error(`check ${check.id} interval must be from ${MIN_INTERVAL_MS}ms to ${MAX_INTERVAL_MS}ms`);
     }
     const confirmFails = check.confirmFails ?? defaults.confirmFails;
     if (!Number.isInteger(confirmFails) || confirmFails < 1 || confirmFails > 10) {
@@ -311,8 +312,8 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
   const intervalMs = check.intervalMs || defaults.intervalMs;
   const timeoutMs = Math.min(check.timeoutMs || defaults.timeoutMs, MAX_TIMEOUT_MS);
   const retries = check.retries < 0 ? defaults.retries : check.retries;
-  if (intervalMs < MIN_INTERVAL_MS) {
-    throw new Error(`check ${check.id} interval must be >= ${MIN_INTERVAL_MS}ms`);
+  if (intervalMs < MIN_INTERVAL_MS || intervalMs > MAX_INTERVAL_MS) {
+    throw new Error(`check ${check.id} interval must be from ${MIN_INTERVAL_MS}ms to ${MAX_INTERVAL_MS}ms`);
   }
   if (!Number.isInteger(retries) || retries < 0 || retries > 5) {
     throw new Error(`check ${check.id} retries must be an integer from 0 to 5`);

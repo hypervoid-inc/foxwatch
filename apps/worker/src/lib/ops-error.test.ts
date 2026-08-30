@@ -5,7 +5,7 @@ import { fail, failFromUnknown, opsErrorBody } from "./ops-error.ts";
 describe("opsErrorBody", () => {
   it("returns a sentence for known codes", () => {
     expect(opsErrorBody("timeout")).toEqual({
-      error: "Timeout must be from 1ms to 30 seconds.",
+      error: "Timeout must be from 1ms to 60 seconds.",
       code: "timeout",
     });
     expect(opsErrorBody("latency").error).toMatch(/below the timeout/);

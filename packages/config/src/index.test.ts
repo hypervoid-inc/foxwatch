@@ -77,6 +77,31 @@ describe("defineConfig", () => {
     }
   });
 
+  it("accepts 4h intervals and 60s timeouts", () => {
+    const cfg = defineConfig({
+      site: { name: "Acme" },
+      groups: [
+        {
+          id: "g",
+          name: "G",
+          components: [
+            {
+              id: "c",
+              name: "C",
+              checks: [http("slow", { url: "https://example.com", interval: "4h", timeout: "60s" })],
+            },
+          ],
+        },
+      ],
+    });
+    const check = cfg.groups[0]!.components[0]!.checks[0]!;
+    expect(check.type).toBe("http");
+    if (check.type === "http") {
+      expect(check.intervalMs).toBe(14_400_000);
+      expect(check.timeoutMs).toBe(60_000);
+    }
+  });
+
   it("rejects secrets not on the allowlist", () => {
     expect(() =>
       defineConfig({

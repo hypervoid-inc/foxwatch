@@ -1,15 +1,22 @@
-export const DURATION_UNITS = ["ms", "s", "m"] as const;
+export const DURATION_UNITS = ["ms", "s", "m", "h"] as const;
 export type DurationUnit = (typeof DURATION_UNITS)[number];
 
-export const UNIT_MS: Record<DurationUnit, number> = { ms: 1, s: 1_000, m: 60_000 };
-export const UNIT_LABEL: Record<DurationUnit, string> = { ms: "ms", s: "sec", m: "min" };
+export const UNIT_MS: Record<DurationUnit, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 };
+export const UNIT_LABEL: Record<DurationUnit, string> = { ms: "ms", s: "sec", m: "min", h: "hr" };
 
 export function splitDuration(ms: number): { value: string; unit: DurationUnit } {
   if (!Number.isFinite(ms) || ms <= 0) return { value: "10", unit: "s" };
   const n = Math.round(ms);
+  if (n % 3_600_000 === 0 && n >= 3_600_000) return { value: String(n / 3_600_000), unit: "h" };
   if (n % 60_000 === 0 && n >= 60_000) return { value: String(n / 60_000), unit: "m" };
   if (n % 1_000 === 0) return { value: String(n / 1_000), unit: "s" };
   return { value: String(n), unit: "ms" };
+}
+
+export function parseDurationToken(input: string): number | null {
+  const m = /^(\d+)(ms|s|m|h)$/.exec(input.trim());
+  if (!m) return null;
+  return durationMs(m[1]!, m[2] as DurationUnit);
 }
 
 export function durationMs(value: string, unit: DurationUnit): number | null {

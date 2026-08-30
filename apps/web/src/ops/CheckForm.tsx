@@ -5,13 +5,14 @@ import {
   convertDuration,
   durationMs,
   maxAmount,
+  parseDurationToken,
   sanitizeInt,
   splitDuration,
   unitsForCap,
   UNIT_LABEL,
   type DurationUnit,
 } from "./duration.ts";
-import { MAX_REGIONS, MAX_TIMEOUT_MS, REGIONS } from "@foxwatch/config";
+import { MAX_INTERVAL_MS, MAX_REGIONS, MAX_TIMEOUT_MS, MIN_INTERVAL_MS, REGIONS } from "@foxwatch/config";
 import { regionLabel, regionTitle } from "./labels.ts";
 import { CopyPanel, ErrorText, InfoTip, Mark, Seg, useActionFlash } from "./ui.tsx";
 
@@ -21,8 +22,8 @@ function rejectNonDigitKey(e: KeyboardEvent<HTMLInputElement>) {
 }
 
 const METHODS = ["GET", "HEAD", "POST"] as const;
-const INTERVALS_HTTP = ["1m", "5m", "10m", "15m", "30m", "60m"] as const;
 const INTERVALS_HB = ["1m", "5m", "10m", "15m"] as const;
+const INTERVAL_UNITS: DurationUnit[] = ["s", "m", "h"];
 const GRACES = ["30s", "1m", "2m", "5m"] as const;
 const DEFAULT_REGIONS = ["wnam", "weur", "apac"];
 const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
@@ -311,6 +312,8 @@ function DurationInput({
   capMs,
   required,
   placeholder,
+  units: unitList,
+  min = 1,
   onChange,
 }: {
   id: string;
@@ -319,20 +322,22 @@ function DurationInput({
   capMs: number;
   required?: boolean;
   placeholder?: string;
+  units?: DurationUnit[];
+  min?: number;
   onChange: (value: string, unit: DurationUnit) => void;
 }) {
-  const units = unitsForCap(capMs);
-  const max = Math.max(1, maxAmount(unit, capMs));
+  const units = (unitList ?? unitsForCap(capMs)).filter((u) => maxAmount(u, capMs) >= min);
+  const max = Math.max(min, maxAmount(unit, capMs));
   return (
     <span className="check-duration">
-      <IntInput id={id} value={value} min={1} max={max} required={required} placeholder={placeholder} onChange={(next) => onChange(next, unit)} />
+      <IntInput id={id} value={value} min={min} max={max} required={required} placeholder={placeholder} onChange={(next) => onChange(next, unit)} />
       <select
         className="check-plain check-unit"
         aria-label="Unit"
         value={units.includes(unit) ? unit : (units[0] ?? "ms")}
         onChange={(e) => {
           const next = e.target.value as DurationUnit;
-          onChange(convertDuration(value, unit, next, capMs), next);
+          onChange(convertDuration(value, unit, next, capMs, min), next);
         }}
       >
         {units.map((id) => (
@@ -501,7 +506,12 @@ export function CheckForm({
       }
       const timeoutMs = durationMs(form.timeout, form.timeoutUnit);
       if (timeoutMs == null || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
-        setError("Timeout must be from 1ms to 30 seconds.");
+        setError("Timeout must be from 1ms to 60 seconds.");
+        return;
+      }
+      const intervalMs = parseDurationToken(form.interval);
+      if (intervalMs == null || intervalMs < MIN_INTERVAL_MS || intervalMs > MAX_INTERVAL_MS) {
+        setError("Interval must be from 30 seconds to 24 hours.");
         return;
       }
       const retries = Number(form.retries);
@@ -583,7 +593,8 @@ export function CheckForm({
     });
   }
 
-  const intervals = form.checkType === "heartbeat" ? INTERVALS_HB : INTERVALS_HTTP;
+  const intervalParts = splitDuration(parseDurationToken(form.interval) ?? 60_000);
+  const intervalUnit = INTERVAL_UNITS.includes(intervalParts.unit) ? intervalParts.unit : "m";
 
   return (
     <form className="card check-form" onSubmit={submit}>
@@ -662,16 +673,18 @@ export function CheckForm({
             <label className="check-row" htmlFor="check-interval">
               <span className="check-row-k">
                 Every
-                <InfoTip>How often to probe this endpoint.</InfoTip>
+                <InfoTip>How often to probe this endpoint. Type a whole number and pick sec, min, or hr (30 seconds to 24 hours).</InfoTip>
               </span>
-              <select id="check-interval" className="check-plain check-plain-end" value={form.interval} onChange={(e) => set("interval", e.target.value)}>
-                {!intervals.includes(form.interval as never) ? <option value={form.interval}>{form.interval}</option> : null}
-                {intervals.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
+              <DurationInput
+                id="check-interval"
+                value={intervalParts.value}
+                unit={intervalUnit}
+                capMs={MAX_INTERVAL_MS}
+                units={INTERVAL_UNITS}
+                min={intervalUnit === "s" ? 30 : 1}
+                required
+                onChange={(value, unit) => set("interval", `${value}${unit}`)}
+              />
             </label>
           </div>
           <div className="check-row check-row-stack">
@@ -717,8 +730,8 @@ export function CheckForm({
                 <InfoTip>Expected interval between heartbeat pings from your service.</InfoTip>
               </span>
               <select id="check-interval" className="check-plain check-plain-end" value={form.interval} onChange={(e) => set("interval", e.target.value)}>
-                {!intervals.includes(form.interval as never) ? <option value={form.interval}>{form.interval}</option> : null}
-                {intervals.map((v) => (
+                {!INTERVALS_HB.includes(form.interval as never) ? <option value={form.interval}>{form.interval}</option> : null}
+                {INTERVALS_HB.map((v) => (
                   <option key={v} value={v}>
                     {v}
                   </option>
@@ -930,7 +943,7 @@ export function CheckForm({
                   <label className="check-row" htmlFor="check-timeout">
                     <span className="check-row-k">
                       Timeout
-                      <InfoTip>Max wait for a response. The probe fails at or past this limit (up to 30 seconds). Type a whole number and pick ms or sec.</InfoTip>
+                      <InfoTip>Max wait for a response. The probe fails at or past this limit (up to 60 seconds). Type a whole number and pick ms or sec.</InfoTip>
                     </span>
                     <DurationInput
                       id="check-timeout"

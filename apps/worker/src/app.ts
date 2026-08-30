@@ -5,6 +5,7 @@ import {
   ID_RE,
   MAX_MONITORS,
   MIN_INTERVAL_MS,
+  MAX_INTERVAL_MS,
   MAX_TIMEOUT_MS,
   MAX_REGIONS,
   MAX_ASSERTIONS,
@@ -970,8 +971,8 @@ function parseCheckInput(body: Record<string, unknown>): Check {
       critical: Boolean(body.critical),
       confirmFails: Number(body.confirmFails ?? 3),
     });
-    if (ch.intervalMs < MIN_INTERVAL_MS) throw new Error("interval");
-    if (ch.intervalMs > 24 * 60 * 60 * 1000 || ch.graceMs > 7 * 24 * 60 * 60 * 1000) throw new Error("interval");
+    if (ch.intervalMs < MIN_INTERVAL_MS || ch.intervalMs > MAX_INTERVAL_MS) throw new Error("interval");
+    if (ch.graceMs > 7 * 24 * 60 * 60 * 1000) throw new Error("interval");
     if (!Number.isInteger(ch.confirmFails) || ch.confirmFails! < 1 || ch.confirmFails! > 10) throw new Error("confirm_fails");
     return ch;
   }
@@ -1061,7 +1062,7 @@ function parseCheckInput(body: Record<string, unknown>): Check {
     critical: Boolean(body.critical),
     followRedirects: body.followRedirects !== false,
   });
-  if (ch.intervalMs < MIN_INTERVAL_MS) throw new Error("interval");
+  if (ch.intervalMs < MIN_INTERVAL_MS || ch.intervalMs > MAX_INTERVAL_MS) throw new Error("interval");
   if (!Number.isInteger(ch.retries) || ch.retries < 0 || ch.retries > 5) throw new Error("retries");
   if (!Number.isInteger(ch.confirmFails) || ch.confirmFails! < 1 || ch.confirmFails! > 10) throw new Error("confirm_fails");
   if (!Number.isFinite(ch.timeoutMs) || ch.timeoutMs < 1 || ch.timeoutMs > MAX_TIMEOUT_MS) throw new Error("timeout");
