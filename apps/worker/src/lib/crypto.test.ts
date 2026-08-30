@@ -195,6 +195,83 @@ describe("public html", () => {
     expect(html).not.toMatch(/jsdelivr|unpkg|cdnjs|cdn\./i);
     expect(html).not.toContain("From the edge");
     expect(html).not.toMatch(/https?:\/\/example\.com/);
+    expect(html).toContain("We&#39;re not aware of any issues affecting our systems.");
+  });
+
+  it("names degraded and failing groups in the banner body", async () => {
+    const { renderBannerBlock } = await import("./public-html.ts");
+    const component = (
+      id: string,
+      name: string,
+      status: "operational" | "degraded" | "failing",
+    ) => ({
+      id,
+      name,
+      groupId: id,
+      groupName: name,
+      status,
+      uptime90: 1,
+      days: [],
+    });
+    const snap = (
+      banner: "degraded" | "failing",
+      groups: Array<{ id: string; name: string; components: ReturnType<typeof component>[] }>,
+    ) => ({
+      siteName: "Acme",
+      banner,
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups,
+      incidents: [],
+    });
+
+    expect(
+      renderBannerBlock(
+        snap("degraded", [
+          { id: "api", name: "API", components: [component("checkout", "Checkout", "degraded")] },
+        ]),
+      ),
+    ).toContain("API is impacted.");
+
+    expect(
+      renderBannerBlock(
+        snap("degraded", [
+          {
+            id: "api",
+            name: "API",
+            components: [
+              component("checkout", "Checkout", "degraded"),
+              component("auth", "Auth", "operational"),
+            ],
+          },
+          { id: "gw", name: "Inference Gateway", components: [component("gw", "Inference Gateway", "degraded")] },
+        ]),
+      ),
+    ).toContain("API and Inference Gateway are impacted.");
+
+    expect(
+      renderBannerBlock(
+        snap("degraded", [
+          { id: "api", name: "API", components: [component("api", "API", "degraded")] },
+          { id: "os", name: "OS", components: [component("os", "OS", "degraded")] },
+          { id: "mem", name: "Memory", components: [component("mem", "Memory", "degraded")] },
+        ]),
+      ),
+    ).toContain("API, OS, and Memory are impacted.");
+
+    expect(
+      renderBannerBlock(
+        snap("failing", [{ id: "api", name: "API", components: [component("api", "API", "failing")] }]),
+      ),
+    ).toContain("API is unavailable.");
+
+    expect(renderBannerBlock(snap("failing", []))).toContain(
+      "Some systems are currently unavailable. We&#39;re working to restore service.",
+    );
+    expect(renderBannerBlock(snap("degraded", []))).toContain(
+      "Some systems are impacted. We&#39;re investigating and will post updates here.",
+    );
   });
 
   it("omits globe assets when the snapshot disables the globe", async () => {

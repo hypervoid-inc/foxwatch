@@ -114,6 +114,29 @@ function groupStatus(components: PublicComponent[]): ComponentStatus {
   return "operational";
 }
 
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+function affectedGroupNames(snap: PublicSnapshot): string[] {
+  return snap.groups
+    .filter((group) => {
+      const status = groupStatus(group.components);
+      return status === "degraded" || status === "failing";
+    })
+    .map((group) => group.name);
+}
+
+function bannerBody(snap: PublicSnapshot): string {
+  if (snap.banner !== "degraded" && snap.banner !== "failing") return BODY[snap.banner];
+  const names = affectedGroupNames(snap);
+  if (!names.length) return BODY[snap.banner];
+  const verb = snap.banner === "failing" ? "unavailable" : "impacted";
+  return `${joinNames(names)} ${names.length === 1 ? "is" : "are"} ${verb}.`;
+}
+
 function mergeDays(components: PublicComponent[]): PublicDay[] {
   const first = components[0]?.days ?? [];
   return first.map((d, i) => {
@@ -1048,7 +1071,7 @@ export function renderBannerBlock(snap: PublicSnapshot): string {
           ${mark(snap.banner === "unknown" ? "empty" : snap.banner === "fully_operational" ? "operational" : snap.banner === "failing" ? "failing" : "degraded")}
           <h1>${escapeHtml(LABELS[snap.banner])}</h1>
         </div>
-        <p class="banner-body">${escapeHtml(BODY[snap.banner])}</p>
+        <p class="banner-body">${escapeHtml(bannerBody(snap))}</p>
       </section>${renderNotices(snap)}</div>`;
 }
 
