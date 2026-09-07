@@ -16,7 +16,7 @@ export {
   type RegionRun,
 } from "./status.ts";
 export { sanitizeText, escapeHtml, escapeXml } from "./sanitize.ts";
-export { publicSnapshot, type PublicSnapshot, type PublicComponent, type PublicDay } from "./public.ts";
+export { publicSnapshot, type PublicSnapshot, type PublicComponent, type PublicDay, type PublicIncident } from "./public.ts";
 export {
   publicObservers,
   meshArcs,

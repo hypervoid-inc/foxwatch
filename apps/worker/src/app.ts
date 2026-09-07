@@ -23,13 +23,13 @@ import type { Env } from "./env.ts";
 import { allowHttpLocal, envSecret } from "./env.ts";
 import * as schema from "./db/schema.ts";
 import { authorizeOps, clearOpsCookie, csrfOk, isOpenOpsPath, opsCookie, sessionTokenFromRequest, type OpsRole } from "./auth/ops.ts";
-import { readSnapshot, publishSnapshot, loadSettings, saveSettings, rememberSecretNames, loadIcon, saveIcon, deleteIcon } from "./lib/snapshot.ts";
-import { renderBadge, renderFeed, renderHistoryPage, renderLivePayload, renderPublicHtml } from "./lib/public-html.ts";
+import { readSnapshot, publishSnapshot, loadSettings, saveSettings, rememberSecretNames, loadIcon, saveIcon, deleteIcon, loadPublicIncident } from "./lib/snapshot.ts";
+import { renderBadge, renderFeed, renderHistoryPage, renderIncidentPage, renderLivePayload, renderPublicHtml } from "./lib/public-html.ts";
 import { sha256Hex, randomToken, newId } from "./lib/crypto.ts";
 import { auditPageFromRows, parseAuditCursor, parseAuditLimit } from "./lib/audit-page.ts";
 import { monitorStub } from "./do/monitor.ts";
 import { sampleMonitors } from "./lib/samples.ts";
-import { deliverAlert } from "./lib/alerts.ts";
+import { deliverAlert, rememberPublicOrigin } from "./lib/alerts.ts";
 import { loadSecretMap } from "./lib/secret-store.ts";
 import { canManageWorkerSecrets, putWorkerSecret, WorkerSecretError } from "./lib/worker-secrets.ts";
 import {
@@ -44,6 +44,7 @@ import {
 } from "./auth/accounts.ts";
 import { fail, failFromUnknown } from "./lib/ops-error.ts";
 import { visitorFromRequest } from "./lib/visitor.ts";
+import { PUBLIC_INCIDENT_ID_RE } from "./lib/routes.ts";
 
 export const PUBLIC_HEADERS = {
   "content-security-policy":
@@ -72,6 +73,17 @@ app.onError((err, c) => {
 });
 
 app.use("*", async (c, next) => {
+  try {
+    const origin = new URL(c.req.url).origin;
+    const remember = rememberPublicOrigin(c.env, origin);
+    try {
+      c.executionCtx.waitUntil(remember);
+    } catch {
+      await remember;
+    }
+  } catch {
+    /* origin capture must never block a request */
+  }
   await next();
   if (c.req.path.startsWith("/admin") || c.req.path.startsWith("/ops") || c.req.path.startsWith("/api/ops")) {
     for (const [k, v] of Object.entries(OPS_HEADERS)) c.header(k, v);
@@ -94,6 +106,18 @@ app.get("/", async (c) => {
 app.get("/history", async (c) => {
   const snap = await readSnapshot(c.env);
   return c.html(renderHistoryPage(snap), 200, PUBLIC_HEADERS);
+});
+
+app.get("/incidents", (c) => c.redirect("/history", 302));
+
+app.get("/incidents/:id", async (c) => {
+  const id = c.req.param("id");
+  const snap = await readSnapshot(c.env);
+  if (!PUBLIC_INCIDENT_ID_RE.test(id)) {
+    return c.html(renderIncidentPage(snap, null), 404, PUBLIC_HEADERS);
+  }
+  const incident = await loadPublicIncident(c.env, id, snap);
+  return c.html(renderIncidentPage(snap, incident), incident ? 200 : 404, PUBLIC_HEADERS);
 });
 
 app.get("/api/here.json", (c) => {
@@ -381,16 +405,22 @@ app.post("/api/ops/alert-channels/:id/test", async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const channel = (await db.select().from(schema.alertChannels).where(eq(schema.alertChannels.id, id)))[0];
   if (!channel) return fail(c, 404, "not_found");
+  const origin = new URL(c.req.url).origin;
   try {
+    await rememberPublicOrigin(c.env, origin);
     const configured = JSON.parse(channel.eventsJson) as Array<"fail" | "degrade" | "recover">;
     await deliverAlert(c.env, { type: channel.type, secretName: channel.secretName, events: configured }, {
       eventId: newId(),
       event: configured[0] ?? "recover",
       componentId: "test",
-      title: "Test alert — delivery is configured",
+      title: "Test alert, delivery is configured",
+      occurredAt: Date.now(),
+      publicOrigin: origin,
+      source: "test",
+      componentName: "Test",
     });
   } catch {
-    return fail(c, 503, "delivery");
+    return fail(c, 503, "delivery_failed");
   }
   await audit(c.env, actorOf(c), "test-alert-channel", undefined, { id });
   return c.json({ ok: true });
@@ -883,8 +913,22 @@ app.post("/api/ops/incidents", async (c) => {
   });
   if (body.notify !== false) {
     const alertTargets = requested.length ? requested : ["global"];
+    const updateBody = sanitizeText(body.body ?? "Investigating.", 2000);
     try {
-      await c.env.ALERTS.send({ eventId: newId(), event: body.impact === "failing" ? "fail" : "degrade", componentId: alertTargets.join(","), title });
+      await c.env.ALERTS.send({
+        eventId: newId(),
+        event: body.impact === "failing" ? "fail" : "degrade",
+        componentId: alertTargets.join(","),
+        title,
+        occurredAt: createdAt,
+        publicOrigin: new URL(c.req.url).origin,
+        source: "incident",
+        componentIds: requested.length ? requested : undefined,
+        incidentId: id,
+        incidentStatus: "investigating",
+        incidentImpact: body.impact === "failing" ? "failing" : "degraded",
+        updateBody,
+      });
     } catch {
       /* incident publishing must not fail because an optional queue is absent */
     }
@@ -930,7 +974,16 @@ app.post("/api/ops/incidents/:id/updates", async (c) => {
         eventId: newId(),
         event: status === "resolved" ? "recover" : incident.impact === "failing" ? "fail" : "degrade",
         componentId: targets.join(","),
-        title: `${incident.title}: ${updateText}`,
+        title: incident.title,
+        occurredAt: now,
+        publicOrigin: new URL(c.req.url).origin,
+        source: "incident",
+        componentIds: targets.includes("global") ? undefined : targets,
+        incidentId: id,
+        incidentStatus: status,
+        incidentImpact: incident.impact,
+        updateBody: updateText,
+        durationMs: status === "resolved" ? Math.max(0, now - incident.createdAt) : undefined,
       });
     } catch { /* optional queue */ }
   }

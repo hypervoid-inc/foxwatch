@@ -17,7 +17,8 @@
     "test": "vitest run",
     "check-types": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.worker.json",
     "preinstall": "node -e \"const a=process.env.npm_config_user_agent||''; if(!a.includes('pnpm')){console.error('Foxwatch uses pnpm workspaces. Install pnpm: https://pnpm.io/installation'); process.exit(1)}\"",
-    "foxwatch": "node scripts/cli.mjs"
+    "foxwatch": "node scripts/cli.mjs",
+    "webhook": "node scripts/webhook.mjs"
   },
   "cloudflare": {
     "bindings": {

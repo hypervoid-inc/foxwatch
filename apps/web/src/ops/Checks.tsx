@@ -286,7 +286,7 @@ function RunHistory({ monitor }: { monitor: MonitorRow }) {
               <div className="run-item-head">
                 <Mark status={outcomeMark(run.outcome)} />
                 <strong className="run-item-outcome">{outcomeLabel(run.outcome)}</strong>
-                <span className="run-item-latency">{run.latencyMs != null ? `${run.latencyMs}ms` : "—"}</span>
+                <span className="run-item-latency">{run.latencyMs != null ? `${run.latencyMs}ms` : "-"}</span>
               </div>
               <p className="run-item-detail">{regionTitle(run.region)}{run.colo ? ` · ${run.colo}` : ""}{run.statusCode ? ` · HTTP ${run.statusCode}` : ""} · {new Date(run.checkedAt).toLocaleString()}</p>
               {run.errorClass || run.errorSnippet ? <p className="run-item-error">{[run.errorClass, run.errorSnippet].filter(Boolean).join(": ")}</p> : null}
@@ -323,11 +323,11 @@ function RegionProbes({ latest }: { latest: Latest[] }) {
           return (
             <li key={l.region} className="check-probe" aria-label={label} title={l.errorClass ?? regionTitle(l.region)}>
               <span className="check-probe-region">{regionLabel(l.region)}</span>
-              <span className="check-probe-colo">{l.colo ?? "—"}</span>
+              <span className="check-probe-colo">{l.colo ?? "-"}</span>
               <span className={`check-probe-track tone-${tone}`}>
                 {l.latencyMs != null ? <span className="check-probe-fill" style={{ width: `${pct}%` }} /> : null}
               </span>
-              <span className={`check-probe-ms tone-${tone}`}>{l.latencyMs != null ? `${l.latencyMs}ms` : "—"}</span>
+              <span className={`check-probe-ms tone-${tone}`}>{l.latencyMs != null ? `${l.latencyMs}ms` : "-"}</span>
             </li>
           );
         })}

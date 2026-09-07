@@ -183,7 +183,7 @@ export function Settings({
     }
     if (res.data.created.length) {
       setSampleNote(
-        `Added ${res.data.created.length} sample check${res.data.created.length === 1 ? "" : "s"}. Open Checks or the public page — probes start on their own.`,
+        `Added ${res.data.created.length} sample check${res.data.created.length === 1 ? "" : "s"}. Open Checks or the public page, probes start on their own.`,
       );
     } else {
       setSampleNote("Sample checks are already on this instance.");
@@ -381,7 +381,7 @@ export function Settings({
           <div className="set-card-head">
             <h2 className="section-title">Sample checks</h2>
             <p className="section-copy">
-              Adds httpbingo.org checks for operational, slow, timeout, and error responses. They appear on the public page. Safe to run twice — existing samples are skipped.
+              Adds httpbingo.org checks for operational, slow, timeout, and error responses. They appear on the public page. Safe to run twice, existing samples are skipped.
             </p>
           </div>
           {sampleNote ? <p className="set-empty">{sampleNote}</p> : null}

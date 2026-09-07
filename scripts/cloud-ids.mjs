@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Committed wrangler.jsonc omits D1/KV IDs so the public template never
- * contains account-specific values. Empty strings are invalid — Wrangler
+ * contains account-specific values. Empty strings are invalid, Wrangler
  * requires the field to be absent, not `""`.
  *
  * Wrangler auth in CI: CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID.

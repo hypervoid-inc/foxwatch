@@ -157,7 +157,7 @@ async function ensureD1() {
 
   const verdict = classifyTables(tables);
   if (verdict.kind === "empty") {
-    console.log("  tables: (empty — Foxwatch migrations can be applied)");
+    console.log("  tables: (empty, Foxwatch migrations can be applied)");
   } else if (verdict.kind === "foxwatch") {
     console.log(`  tables: Foxwatch schema (${verdict.present.length} tables)`);
   } else if (verdict.kind === "partial") {
@@ -253,7 +253,7 @@ async function main() {
 
   console.log(`
 Wrote your Cloudflare resource IDs to gitignored wrangler.cloud.jsonc
-(and .foxwatch-cloud.json). wrangler.jsonc is unchanged — clones never see these IDs.
+(and .foxwatch-cloud.json). wrangler.jsonc is unchanged, clones never see these IDs.
 
 Next:
   pnpm deploy

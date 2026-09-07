@@ -13,6 +13,7 @@ const MESSAGES: Record<string, string> = {
   credentials: "Email or password is incorrect.",
   decode: "That file could not be read as an image.",
   delivery: "The alert queue is not available in this environment.",
+  delivery_failed: "The alert could not be delivered. Check the webhook URL secret and try again.",
   end_at: "Pick an end time in the future, within 90 days.",
   exists: "That already exists.",
   expect: "Check the response assertions and expected status codes.",

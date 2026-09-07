@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * foxwatch CLI — create Cloudflare resources for this instance.
+ * foxwatch CLI - create Cloudflare resources for this instance.
  */
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";

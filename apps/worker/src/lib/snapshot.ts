@@ -9,6 +9,7 @@ import {
   regionImpact,
   publicObservers,
   type PublicSnapshot,
+  type PublicIncident,
   type PublicObserver,
   type RegionImpact,
   type RegionRunDetail,
@@ -635,6 +636,38 @@ export async function readSnapshot(env: Env): Promise<PublicSnapshot> {
     });
   }
   return publishSnapshot(env);
+}
+
+export async function loadPublicIncident(env: Env, id: string, snap?: PublicSnapshot): Promise<PublicIncident | null> {
+  const snapshot = snap ?? await readSnapshot(env);
+  const cached = snapshot.incidents.find((incident) => incident.id === id);
+  if (cached) return cached;
+  try {
+    const db = drizzle(env.DB, { schema });
+    const row = (await db.select().from(schema.incidents).where(eq(schema.incidents.id, id)))[0];
+    if (!row) return null;
+    const updates = await db.select().from(schema.incidentUpdates).where(eq(schema.incidentUpdates.incidentId, id));
+    const monitors = await db.select({ id: schema.monitors.componentId, name: schema.monitors.componentName }).from(schema.monitors);
+    const names = new Map(monitors.map((monitor) => [monitor.id, monitor.name]));
+    const allIds = [...new Set(monitors.map((monitor) => monitor.id))];
+    const explicit = incidentComponentIds(row);
+    const componentIds = explicit.length ? explicit : allIds;
+    return {
+      id: row.id,
+      componentIds,
+      componentNames: componentIds.map((componentId) => names.get(componentId) ?? componentId),
+      title: sanitizeText(row.title, 200),
+      status: row.status,
+      impact: row.impact,
+      startedAt: row.createdAt,
+      resolvedAt: row.resolvedAt,
+      updates: updates
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((update) => ({ status: update.status, body: sanitizeText(update.body, 2000), at: update.createdAt })),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function latencySamples(ms: number[]): number[] {

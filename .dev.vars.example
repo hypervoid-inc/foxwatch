@@ -10,3 +10,6 @@
 
 # HTTP header secret values for local checks (names are registered in ops)
 # YOUR_API_TOKEN=
+
+# Local Discord webhook smoke test (`pnpm webhook`). Never commit the URL.
+# DISCORD_WEBHOOK_URL=

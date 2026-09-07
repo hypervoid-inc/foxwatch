@@ -1,4 +1,4 @@
-/** Browser globe. No interpolations — concatenated into the public page script. */
+/** Browser globe. No interpolations, concatenated into the public page script. */
 export const GLOBE_CLIENT_SCRIPT = `(function(){
   var stage=document.getElementById("globe-stage");
   if (!stage) return;

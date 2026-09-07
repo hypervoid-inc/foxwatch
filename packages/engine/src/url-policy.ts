@@ -79,7 +79,7 @@ export function assertSafeUrl(
   return url;
 }
 
-/** Link target for the public header — not fetched by the worker. */
+/** Link target for the public header, not fetched by the worker. */
 export function parseHomepageUrl(raw: unknown): string | null {
   if (raw == null) return null;
   if (typeof raw !== "string") throw new UrlPolicyError("invalid_url");

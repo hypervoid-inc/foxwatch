@@ -22,7 +22,7 @@ Requires [Workers Paid](https://developers.cloudflare.com/workers/platform/prici
 
 Create HTTP and heartbeat checks in the **admin UI**, run them from multiple Cloudflare regions, and publish a public page: **fully operational / degraded / failing**.
 
-This is a **GitHub template**. Instance data (hosts, monitors, accounts) lives in **your** D1 after you deploy — never in this repo.
+This is a **GitHub template**. Instance data (hosts, monitors, accounts) lives in **your** D1 after you deploy, never in this repo.
 
 Foxwatch observes **from Cloudflare**. A global Cloudflare outage takes the observer down with the target. That is an explicit tradeoff, not a bug.
 
@@ -70,15 +70,15 @@ Copy the token once. Put it in GitHub **Settings → Secrets and variables → A
 
 | Name | Required |
 | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | yes — the token above |
+| `CLOUDFLARE_API_TOKEN` | yes, the token above |
 
-**Variables** (same page, Variables tab — or secrets with the same names)
+**Variables** (same page, Variables tab, or secrets with the same names)
 
 | Name | Required |
 | --- | --- |
-| `CLOUDFLARE_ACCOUNT_ID` | yes — [account ID](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/) |
-| `FOXWATCH_D1_DATABASE_ID` | no — pin D1 `foxwatch-data` |
-| `FOXWATCH_KV_NAMESPACE_ID` | no — pin KV `foxwatch-status` |
+| `CLOUDFLARE_ACCOUNT_ID` | yes, [account ID](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/) |
+| `FOXWATCH_D1_DATABASE_ID` | no, pin D1 `foxwatch-data` |
+| `FOXWATCH_KV_NAMESPACE_ID` | no, pin KV `foxwatch-status` |
 
 Without the ID variables, CI runs `pnpm foxwatch init --yes` (creates or reuses those named resources) then `pnpm deploy`. IDs are injected into the build output only.
 
@@ -127,7 +127,7 @@ pnpm exec wrangler secret put YOUR_SECRET_NAME
 
 Sensitive headers must use a secret ref. Secrets attach only when the request host is in `allowedHosts`; cross-origin redirects strip them.
 
-**Heartbeats** — create a check in admin, copy the token (or rotate it):
+**Heartbeats** - create a check in admin, copy the token (or rotate it):
 
 ```bash
 curl -X POST https://your-worker/api/heartbeat \
@@ -148,10 +148,10 @@ Public JSON, HTML, RSS, and badges **do not** include check URLs, headers, or er
 
 ## Layout
 
-- `apps/worker` — Hono API, Durable Objects (Scheduler, Monitor, Probe)
-- `apps/web` — admin UI
-- `packages/config` — check shape helpers
-- `packages/engine` — URL policy, assertions, quorum, redaction
-- `migrations` — D1 schema
+- `apps/worker` - Hono API, Durable Objects (Scheduler, Monitor, Probe)
+- `apps/web` - admin UI
+- `packages/config` - check shape helpers
+- `packages/engine` - URL policy, assertions, quorum, redaction
+- `migrations` - D1 schema
 
 AGPL-3.0-or-later.

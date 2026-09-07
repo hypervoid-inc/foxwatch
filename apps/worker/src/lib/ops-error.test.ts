@@ -9,6 +9,7 @@ describe("opsErrorBody", () => {
       code: "timeout",
     });
     expect(opsErrorBody("latency").error).toMatch(/below the timeout/);
+    expect(opsErrorBody("delivery_failed").code).toBe("delivery_failed");
   });
 
   it("passes engine sentences through", () => {

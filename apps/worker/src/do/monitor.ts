@@ -10,6 +10,7 @@ import { probeStub } from "./probe.ts";
 import { bumpUptime, publishSnapshot } from "../lib/snapshot.ts";
 import { loadSecretMap } from "../lib/secret-store.ts";
 import { newId } from "../lib/crypto.ts";
+import type { AlertBody, AlertRegion } from "../lib/alerts.ts";
 
 function asCheck(json: string): Check {
   return JSON.parse(json) as Check;
@@ -98,7 +99,17 @@ export class Monitor extends DurableObject<Env> {
       colo: null,
       errorClass: outcome === "fail" ? "heartbeat" : undefined,
     });
-    await this.afterRuns(componentId, consecutiveFails, confirmedOutcome, outcome, check.confirmFails ?? 3, []);
+    await this.afterRuns(componentId, consecutiveFails, confirmedOutcome, outcome, check.confirmFails ?? 3, [], {
+      checkType: "heartbeat",
+      regions: [{
+        region: "global",
+        outcome,
+        latencyMs: 0,
+        statusCode: null,
+        colo: null,
+        errorClass: outcome === "fail" ? "heartbeat" : null,
+      }],
+    });
   }
 
   private async runHttp(
@@ -133,13 +144,24 @@ export class Monitor extends DurableObject<Env> {
       } catch {
         // WAE is optional for the public page
       }
-      return result;
+      return { ...result, region };
     }));
-    const outcomes = regionResults.map((result) => ({ region: "", outcome: result.outcome }));
+    const outcomes = regionResults.map((result) => ({ region: result.region, outcome: result.outcome }));
     const rawStatus = componentStatus(outcomes, check.failWhen ?? "majority");
     const outcome = rawStatus === "failing" ? "fail" : rawStatus === "degraded" ? "degraded" : "pass";
     const latencies = regionResults.map((result) => result.latencyMs).filter((ms) => ms > 0);
-    await this.afterRuns(componentId, consecutiveFails, confirmedOutcome, outcome, check.confirmFails ?? 3, latencies);
+    await this.afterRuns(componentId, consecutiveFails, confirmedOutcome, outcome, check.confirmFails ?? 3, latencies, {
+      checkType: "http",
+      regions: regionResults.map((result) => ({
+        region: result.region,
+        outcome: result.outcome,
+        latencyMs: result.latencyMs,
+        statusCode: result.statusCode,
+        colo: result.colo,
+        errorClass: result.errorClass ?? null,
+        errorSnippet: result.errorSnippet ?? null,
+      })),
+    });
   }
 
   private async record(
@@ -207,6 +229,7 @@ export class Monitor extends DurableObject<Env> {
     outcome: "pass" | "degraded" | "fail",
     confirmFails: number,
     latencies: number[],
+    details: { checkType: "http" | "heartbeat"; regions: AlertRegion[] },
   ): Promise<void> {
     const flip = confirmFlip(consecutiveFails, outcome, Math.max(1, confirmFails));
     const nextConfirmed = outcome === "fail" && !flip.confirmedFail ? confirmedOutcome : outcome;
@@ -239,22 +262,32 @@ export class Monitor extends DurableObject<Env> {
       });
     await bumpUptime(this.env, componentId, status === "operational" || status === "degraded", latencies);
 
+    const componentName = monitors.find((row) => row.id === id)?.componentName
+      ?? monitors[0]?.componentName
+      ?? componentId;
+    const alertDetails = {
+      componentName,
+      checkType: details.checkType,
+      consecutiveFails: flip.consecutiveFails,
+      regions: details.regions,
+    };
+    let incidentId: string | undefined;
     if (prev?.status !== "failing" && status === "failing") {
-      await this.openIncident(componentId, critical);
+      incidentId = await this.openIncident(componentId, critical) ?? undefined;
     }
     if ((prev?.status === "failing" || prev?.status === "degraded") && status === "operational") {
-      await this.resolveIncidents(componentId);
-      await this.alert("recover", componentId);
+      const resolved = await this.resolveIncidents(componentId);
+      await this.alert("recover", componentId, { ...alertDetails, ...resolved });
     } else if (prev?.status !== status && status === "degraded") {
-      await this.alert("degrade", componentId);
+      await this.alert("degrade", componentId, alertDetails);
     } else if (prev?.status !== "failing" && status === "failing") {
-      await this.alert("fail", componentId);
+      await this.alert("fail", componentId, { ...alertDetails, incidentId });
     }
 
     await publishSnapshot(this.env);
   }
 
-  private async openIncident(componentId: string, _critical = false): Promise<void> {
+  private async openIncident(componentId: string, _critical = false): Promise<string | null> {
     const db = drizzle(this.env.DB, { schema });
     const open = await db
       .select()
@@ -265,7 +298,8 @@ export class Monitor extends DurableObject<Env> {
           inArray(schema.incidents.status, ["investigating", "identified", "monitoring"]),
         ),
       );
-    if (open.some((i) => !i.resolvedAt)) return;
+    const existing = open.find((incident) => !incident.resolvedAt);
+    if (existing) return existing.id;
     const id = newId();
     const now = Date.now();
     const componentName = (await db.select({ name: schema.monitors.componentName }).from(schema.monitors).where(eq(schema.monitors.componentId, componentId)))[0]?.name ?? componentId;
@@ -291,7 +325,8 @@ export class Monitor extends DurableObject<Env> {
           inArray(schema.incidents.status, ["investigating", "identified", "monitoring"]),
         ),
       );
-      if (winner.some((incident) => incident.id !== id)) return;
+      const other = winner.find((incident) => incident.id !== id);
+      if (other) return other.id;
       throw error;
     }
     await db.insert(schema.incidentUpdates).values({
@@ -301,12 +336,14 @@ export class Monitor extends DurableObject<Env> {
       body: "Automatically opened after confirmed check failures.",
       createdAt: now,
     });
+    return id;
   }
 
-  private async resolveIncidents(componentId: string): Promise<void> {
+  private async resolveIncidents(componentId: string): Promise<{ incidentId?: string; durationMs?: number }> {
     const db = drizzle(this.env.DB, { schema });
     const rows = await db.select().from(schema.incidents).where(eq(schema.incidents.componentId, componentId));
     const now = Date.now();
+    let resolved: { incidentId?: string; durationMs?: number } = {};
     for (const row of rows) {
       if (row.resolvedAt || row.auto !== 1) continue;
       await db
@@ -320,12 +357,47 @@ export class Monitor extends DurableObject<Env> {
         body: "Automatically resolved when checks recovered.",
         createdAt: now,
       });
+      if (!resolved.incidentId) {
+        resolved = { incidentId: row.id, durationMs: Math.max(0, now - row.createdAt) };
+      }
     }
+    return resolved;
   }
 
-  private async alert(event: "fail" | "degrade" | "recover", componentId: string): Promise<void> {
+  private async alert(
+    event: "fail" | "degrade" | "recover",
+    componentId: string,
+    details: {
+      componentName: string;
+      checkType: "http" | "heartbeat";
+      consecutiveFails: number;
+      regions: AlertRegion[];
+      incidentId?: string;
+      durationMs?: number;
+    },
+  ): Promise<void> {
+    const title = event === "fail"
+      ? `${details.componentName} is down`
+      : event === "degrade"
+        ? `${details.componentName} is degraded`
+        : `${details.componentName} recovered`;
+    const body: AlertBody = {
+      eventId: newId(),
+      event,
+      componentId,
+      title,
+      occurredAt: Date.now(),
+      source: "monitor",
+      componentName: details.componentName,
+      componentIds: [componentId],
+      checkType: details.checkType,
+      consecutiveFails: details.consecutiveFails,
+      regions: details.regions,
+      incidentId: details.incidentId,
+      durationMs: details.durationMs,
+    };
     try {
-      await this.env.ALERTS.send({ eventId: newId(), event, componentId, title: `${componentId} ${event}` });
+      await this.env.ALERTS.send(body);
     } catch {
       // Queue may be unbound in local tests
     }

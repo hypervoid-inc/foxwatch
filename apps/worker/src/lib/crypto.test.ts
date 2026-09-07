@@ -521,6 +521,9 @@ describe("worker path routing", () => {
     expect(isWorkerPath("/")).toBe(true);
     expect(isWorkerPath("/admin")).toBe(true);
     expect(isWorkerPath("/admin/incidents")).toBe(true);
+    expect(isWorkerPath("/history")).toBe(true);
+    expect(isWorkerPath("/incidents")).toBe(true);
+    expect(isWorkerPath("/incidents/abc")).toBe(true);
     expect(isWorkerPath("/ops")).toBe(true);
     expect(isWorkerPath("/ops/monitors")).toBe(true);
     expect(isWorkerPath("/api/ops/overview")).toBe(true);
@@ -876,6 +879,63 @@ describe("edge mesh html", () => {
     expect(history).not.toContain("envelope=1.16");
     expect(history).not.toContain("status-globe");
     expect(history).not.toContain("/assets/globe.js");
+    const { renderIncidentPage, renderFeed } = await import("./public-html.ts");
+    const open = {
+      id: "inc99abcdefghijklmnop",
+      componentIds: ["api"],
+      componentNames: ["Checkout API"],
+      title: "Checkout API is failing",
+      status: "investigating",
+      impact: "failing",
+      startedAt: 1,
+      resolvedAt: null,
+      updates: [{ status: "investigating", body: "Looking into it.", at: 1 }],
+    };
+    const page = renderIncidentPage({
+      siteName: "Acme",
+      banner: "failing",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [open],
+    }, open);
+    expect(page).toContain("Checkout API is failing");
+    expect(page).toContain("Looking into it.");
+    expect(page).toContain("Back to status");
+    expect(page).toContain('href="/"');
+    expect(page).not.toContain('id="globe-stage"');
+    const missing = renderIncidentPage({
+      siteName: "Acme",
+      banner: "fully_operational",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [],
+    }, null);
+    expect(missing).toContain("Incident not found");
+    const home = renderPublicHtml({
+      siteName: "Acme",
+      banner: "fully_operational",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [open],
+    });
+    expect(home).toContain('href="/incidents/inc99abcdefghijklmnop"');
+    expect(home).toContain('#incident-');
+    expect(home).toContain('location.replace("/incidents/"+m[1])');
+    expect(renderFeed({
+      siteName: "Acme",
+      banner: "fully_operational",
+      stale: false,
+      lastTick: 1,
+      generatedAt: 1,
+      groups: [],
+      incidents: [open],
+    }, "https://status.acme.test")).toContain("https://status.acme.test/incidents/inc99abcdefghijklmnop");
   });
 });
 

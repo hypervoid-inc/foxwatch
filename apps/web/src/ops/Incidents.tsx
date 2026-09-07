@@ -88,7 +88,7 @@ export function Incidents({
           <div className="card overflow-hidden">
             <div className="px-4 py-3">
               <h2 className="section-title">Active incidents</h2>
-              <p className="section-copy">{active.length} ongoing — updates appear on the public status page.</p>
+              <p className="section-copy">{active.length} ongoing, updates appear on the public status page.</p>
             </div>
             <ul className="incident-list">
               {active.map((i) => (

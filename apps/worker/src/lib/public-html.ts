@@ -54,7 +54,7 @@ const IMPACT: Record<string, string> = {
 };
 
 function pct(n: number | null): string {
-  if (n == null) return "—";
+  if (n == null) return "-";
   return `${(n * 100).toFixed(2)}%`;
 }
 
@@ -407,13 +407,23 @@ function incidentDuration(incident: PublicIncident): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
-function renderIncidentArticle(i: PublicIncident): string {
+function incidentPath(id: string): string {
+  return `/incidents/${encodeURIComponent(id)}`;
+}
+
+function renderIncidentArticle(i: PublicIncident, opts: { linked?: boolean; heading?: boolean } = {}): string {
+  const linked = opts.linked !== false;
+  const heading = opts.heading !== false;
   const statusBadge = `<span class="badge badge-${escapeHtml(i.status)}">${escapeHtml(incidentStatusLabel(i.status))}</span>`;
   const impactBadge = `<span class="badge badge-${escapeHtml(i.impact)}">${escapeHtml(impactLabel(i.impact))}</span>`;
   const duration = i.resolvedAt ? `<p class="incident-duration">Duration: ${escapeHtml(incidentDuration(i))}</p>` : "";
   const components = i.componentNames?.length ? `<span class="badge badge-monitoring">${escapeHtml(i.componentNames.join(", "))}</span>` : "";
+  const title = linked
+    ? `<h3><a href="${escapeHtml(incidentPath(i.id))}">${escapeHtml(i.title)}</a></h3>`
+    : `<h3>${escapeHtml(i.title)}</h3>`;
+  const header = heading ? `<div class="incident-header">${title}</div>` : "";
   return `<article class="incident" id="incident-${escapeHtml(i.id)}">
-    <div class="incident-header"><h3>${escapeHtml(i.title)}</h3></div>
+    ${header}
     <div class="incident-badges">${statusBadge}${impactBadge}${components}</div>
     ${duration}
     ${renderTimeline(i)}
@@ -431,7 +441,7 @@ function renderIncidentsByDay(incidents: PublicIncident[]): string {
   return [...byDay.entries()]
     .sort(([a], [b]) => b.localeCompare(a))
     .map(([day, dayIncidents]) => {
-      const articles = dayIncidents.map(renderIncidentArticle).join("");
+      const articles = dayIncidents.map((incident) => renderIncidentArticle(incident)).join("");
       return `<div class="incident-day"><p class="incident-date">${escapeHtml(formatDayHeading(day))}</p>${articles}</div>`;
     })
     .join("");
@@ -1011,6 +1021,8 @@ details[open] ~ .group-bar { display: none; }
 .badge-failing { background: var(--bad-bg); color: var(--bad-ink); }
 .incident-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.3rem; }
 .incident-header h3 { margin: 0; font-size: 0.95rem; letter-spacing: -0.01em; }
+.incident-header a { color: inherit; text-decoration: none; }
+.incident-header a:hover { text-decoration: underline; }
 .incident-badges { display: flex; align-items: center; gap: 0.35rem; margin: 0.3rem 0 0.45rem; flex-wrap: wrap; }
 .incident-duration { color: var(--muted); font-size: 0.75rem; margin: 0 0 0.55rem; }
 .back-link {
@@ -1547,6 +1559,7 @@ export function renderPublicHtml(snap: PublicSnapshot): string {
   <meta name="description" content="${escapeHtml(LABELS[snap.banner])}"/>
   <link rel="icon" href="${pageIcon(snap)}"/>
   <script>${THEME_BOOT}</script>
+  <script>(function(){var m=location.hash.match(/^#incident-([A-Za-z0-9_-]{8,64})$/);if(m)location.replace("/incidents/"+m[1]);})();</script>
   <style>${STYLES}</style>
   ${globe ? `<script>${GUTTER_BOOT}</script>` : ""}
 </head>
@@ -1580,7 +1593,7 @@ export function renderHistoryPage(snap: PublicSnapshot): string {
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="theme-color" content="#efece6"/>
-  <title>Incident history — ${escapeHtml(snap.siteName)}</title>
+  <title>Incident history - ${escapeHtml(snap.siteName)}</title>
   <meta name="description" content="Full incident history for ${escapeHtml(snap.siteName)}"/>
   <link rel="icon" href="${pageIcon(snap)}"/>
   <script>${THEME_BOOT}</script>
@@ -1608,6 +1621,45 @@ export function renderHistoryPage(snap: PublicSnapshot): string {
 </html>`;
 }
 
+export function renderIncidentPage(snap: PublicSnapshot, incident: PublicIncident | null): string {
+  const title = incident ? incident.title : "Incident not found";
+  const body = incident
+    ? renderIncidentArticle(incident, { linked: false, heading: false })
+    : `<p class="quiet">That incident is gone, or the link is no longer valid.</p>`;
+  return `<!doctype html>
+<html lang="en" data-banner="${escapeHtml(snap.banner)}">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="theme-color" content="#efece6"/>
+  <title>${escapeHtml(title)} - ${escapeHtml(snap.siteName)}</title>
+  <meta name="description" content="${escapeHtml(incident ? `${incidentStatusLabel(incident.status)} - ${impactLabel(incident.impact)}` : `Incident page for ${snap.siteName}`)}"/>
+  <link rel="icon" href="${pageIcon(snap)}"/>
+  <script>${THEME_BOOT}</script>
+  <style>${STYLES}</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      ${renderBrandBlock(snap)}
+      ${THEME_TOGGLE}
+    </header>
+    <main>
+      <a class="back-link" href="/"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M7.5 2.5 4 6l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Back to status</a>
+      <section class="card" aria-labelledby="incident-title">
+        <div class="card-head"><h2 id="incident-title">${escapeHtml(title)}</h2></div>
+        ${body}
+      </section>
+    </main>
+    <footer class="foot">
+      <p><a class="by" href="https://github.com/hypervoid-inc/foxwatch" target="_blank" rel="noopener noreferrer">${FOOT_FOX}Powered by Foxwatch</a></p>
+      <p class="disclaimer">Availability is measured from Cloudflare's edge. Figures are aggregated across regions and checks; individual experience may vary by path and location.</p>
+    </footer>
+  </div>
+</body>
+</html>`;
+}
+
 export function renderBadge(snap: PublicSnapshot): string {
   const label = LABELS[snap.banner].replace(/\.$/, "");
   const color = bannerColor(snap.banner);
@@ -1623,13 +1675,13 @@ export function renderBadge(snap: PublicSnapshot): string {
 export function renderFeed(snap: PublicSnapshot, origin: string): string {
   const items = snap.incidents
     .map((i) => {
-      const link = `${origin}/#incident-${encodeURIComponent(i.id)}`;
+      const link = `${origin}/incidents/${encodeURIComponent(i.id)}`;
       return `<item>
         <title>${escapeHtml(i.title)}</title>
         <link>${escapeHtml(link)}</link>
         <guid>${escapeHtml(link)}</guid>
         <pubDate>${escapeHtml(new Date(i.startedAt).toUTCString())}</pubDate>
-        <description>${escapeHtml(incidentStatusLabel(i.status))} — ${escapeHtml(impactLabel(i.impact))}</description>
+        <description>${escapeHtml(incidentStatusLabel(i.status))} - ${escapeHtml(impactLabel(i.impact))}</description>
       </item>`;
     })
     .join("");
