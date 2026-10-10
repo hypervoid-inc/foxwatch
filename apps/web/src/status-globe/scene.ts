@@ -224,6 +224,11 @@ export function bakeLand(gpu: Gpu, rings: number[][][]): Texture {
 export const HOP_LIFT = 0.16;
 export const HOP_STEPS = 40;
 
+/** Most markers the globe draws: the regions and the visitor. */
+export const MAX_PROBES = 24;
+/** Room for every hop those markers can have: meshArcs joins a region to at most two others, and the visitor has one hop to the nearest. */
+export const MAX_HOPS = ((MAX_PROBES - 1) * 2 + 1) * HOP_STEPS;
+
 export function hopSamples(a: Vec3, b: Vec3): Vec3[] {
   return sampleTrajectory(a, b, HOP_STEPS, HOP_LIFT);
 }

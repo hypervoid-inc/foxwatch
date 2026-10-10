@@ -34,6 +34,23 @@ export function layoutGlobe(w: number, h: number, rem: number) {
   return { cx, cy, radius, envelope };
 }
 
+/** Room past the hop envelope for a marker on the rim and the width of a line. */
+const BOX_PAD = 8;
+
+/**
+ * The part of the viewport the globe can draw into: the sphere, the hops lifted
+ * above it and the markers, in whole CSS pixels and never past the viewport.
+ * The WebGPU canvas and its multisampled target are this size, not the screen's.
+ */
+export function globeBox(layout: { cx: number; cy: number; radius: number; envelope: number }, w: number, h: number) {
+  const reach = layout.radius * layout.envelope + BOX_PAD;
+  const x = Math.min(Math.max(0, w - 1), Math.max(0, Math.floor(layout.cx - reach)));
+  const y = Math.min(Math.max(0, h - 1), Math.max(0, Math.floor(layout.cy - reach)));
+  const right = Math.min(w, Math.ceil(layout.cx + reach));
+  const bottom = Math.min(h, Math.ceil(layout.cy + reach));
+  return { x, y, w: Math.max(1, right - x), h: Math.max(1, bottom - y) };
+}
+
 export function mat4Multiply(a: ArrayLike<number>, b: ArrayLike<number>, out = new Float32Array(16)): Float32Array {
   for (let col = 0; col < 4; col++) {
     for (let row = 0; row < 4; row++) {

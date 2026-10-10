@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.worker.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "vite/client", "node"]
+  },
+  "include": [
+    "apps/worker/src/**/*.test.ts",
+    "apps/worker/test",
+    "packages/config/src/**/*.test.ts",
+    "packages/engine/src/**/*.test.ts"
+  ],
+  "exclude": ["apps/worker/src/lib/public-globe.test.ts"]
+}

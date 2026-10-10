@@ -213,6 +213,8 @@ html[data-theme="dark"] {
   --overlay: rgb(20 19 17 / 0.45);
 }
 
+/* Same palette again, for a page where index.html could not set data-theme
+   (storage blocked). index-css.test.ts keeps the two copies identical. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
@@ -545,14 +547,6 @@ textarea.input-code {
   padding: 0 0.15rem;
 }
 
-.check-recipe {
-  margin: 0;
-  font-size: 0.75rem;
-  color: var(--color-muted);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.01em;
-}
-
 .check-sheet {
   display: flex;
   flex-direction: column;
@@ -688,12 +682,6 @@ textarea.input-code {
 
 .check-req .check-plain {
   min-height: 2.1rem;
-}
-
-.check-hint {
-  margin: 0.3rem 0.3rem 0;
-  font-size: 0.6875rem;
-  color: var(--color-muted);
 }
 
 .check-sheet-note {
@@ -1184,6 +1172,11 @@ textarea.input-code {
   color: var(--color-bad-ink);
 }
 
+.pill-empty {
+  background: var(--empty);
+  color: var(--color-ink);
+}
+
 .check-list {
   margin: 0;
   padding: 0;
@@ -1466,10 +1459,6 @@ ul.check-sheet {
   list-style: none;
   margin: 0;
   padding: 0;
-}
-
-.set-secret-edit {
-  border-top: 1px solid var(--color-line);
 }
 
 .set-secret-name {
@@ -2107,14 +2096,6 @@ ul.check-sheet {
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   color: var(--color-muted);
-}
-
-.test-result-error {
-  margin: 0;
-  padding: 0.5rem 0.75rem;
-  font-size: 0.75rem;
-  color: var(--color-bad);
-  word-break: break-word;
 }
 
 .test-result-body {

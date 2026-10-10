@@ -1,11 +1,12 @@
 import { drizzle } from "drizzle-orm/d1";
 import { desc, eq, gte, inArray, isNull, or } from "drizzle-orm";
-import type { BannerStatus, Check, ComponentStatus } from "@foxwatch/config";
+import { isReservedSecretName, SECRET_NAME_RE, type BannerStatus, type Check, type ComponentStatus } from "@foxwatch/config";
 import {
   bannerStatus,
   publicSnapshot,
   sanitizeText,
   parseHomepageUrl,
+  parsePublicUrl,
   regionImpact,
   publicObservers,
   type PublicSnapshot,
@@ -16,15 +17,16 @@ import {
 } from "@foxwatch/engine";
 import type { Env } from "../env.ts";
 import * as schema from "../db/schema.ts";
-import { renderLivePayload } from "./public-html.ts";
+import { liveNotice, renderLivePayload } from "./public-html.ts";
 import { statusHubStub } from "../do/hub.ts";
+import type { Scheduler } from "../do/scheduler.ts";
 import { sniffIconMime } from "./crypto.ts";
 
 function utcDate(ts: number): string {
   return new Date(ts).toISOString().slice(0, 10);
 }
 
-function incidentComponentIds(incident: { componentId: string | null; componentIdsJson: string | null }): string[] {
+export function incidentComponentIds(incident: { componentId: string | null; componentIdsJson: string | null }): string[] {
   try {
     const parsed = JSON.parse(incident.componentIdsJson ?? "null") as unknown;
     if (Array.isArray(parsed)) return parsed.filter((id): id is string => typeof id === "string");
@@ -73,6 +75,8 @@ export type InstanceSettings = {
   siteName: string;
   secrets: string[];
   homepageUrl: string | null;
+  /** Origin the status page is served from. Alert links use it when set. */
+  publicUrl: string | null;
   iconUpdatedAt: number | null;
   globe: boolean;
 };
@@ -81,6 +85,7 @@ const DEFAULT_SETTINGS: InstanceSettings = {
   siteName: "Foxwatch",
   secrets: [],
   homepageUrl: null,
+  publicUrl: null,
   iconUpdatedAt: null,
   globe: true,
 };
@@ -107,7 +112,7 @@ function parseSettings(raw: string): InstanceSettings {
   try {
     const parsed = JSON.parse(raw) as Partial<InstanceSettings>;
     const secrets = Array.isArray(parsed.secrets)
-      ? parsed.secrets.filter((n): n is string => typeof n === "string" && /^[A-Z][A-Z0-9_]{0,127}$/.test(n))
+      ? parsed.secrets.filter((n): n is string => typeof n === "string" && SECRET_NAME_RE.test(n) && !isReservedSecretName(n))
       : [];
     const siteName = sanitizeText(typeof parsed.siteName === "string" ? parsed.siteName : DEFAULT_SETTINGS.siteName, 80);
     let homepageUrl: string | null = null;
@@ -115,6 +120,12 @@ function parseSettings(raw: string): InstanceSettings {
       homepageUrl = parseHomepageUrl(parsed.homepageUrl ?? null);
     } catch {
       homepageUrl = null;
+    }
+    let publicUrl: string | null = null;
+    try {
+      publicUrl = parsePublicUrl(parsed.publicUrl ?? null);
+    } catch {
+      publicUrl = null;
     }
     const iconUpdatedAt =
       typeof parsed.iconUpdatedAt === "number" && Number.isFinite(parsed.iconUpdatedAt) && parsed.iconUpdatedAt > 0
@@ -124,6 +135,7 @@ function parseSettings(raw: string): InstanceSettings {
       siteName: siteName || DEFAULT_SETTINGS.siteName,
       secrets: [...new Set(secrets)].sort(),
       homepageUrl,
+      publicUrl,
       iconUpdatedAt,
       globe: parsed.globe !== false,
     };
@@ -136,32 +148,74 @@ export function iconPublicUrl(updatedAt: number | null): string | null {
   return updatedAt ? `/icon?v=${updatedAt}` : null;
 }
 
+// Throws when the read fails. Writers go through this so a D1 hiccup is never
+// mistaken for an empty row and saved back over the secret registry.
+async function readSettings(env: Env): Promise<InstanceSettings> {
+  const db = drizzle(env.DB, { schema });
+  const rows = await db.select().from(schema.siteSettings).where(eq(schema.siteSettings.key, "settings"));
+  return rows[0] ? parseSettings(rows[0].valueJson) : { ...DEFAULT_SETTINGS };
+}
+
 export async function loadSettings(env: Env): Promise<InstanceSettings> {
   try {
-    const db = drizzle(env.DB, { schema });
-    const rows = await db.select().from(schema.siteSettings).where(eq(schema.siteSettings.key, "settings"));
-    if (rows[0]) return parseSettings(rows[0].valueJson);
+    return await readSettings(env);
   } catch {
     /* schema may not exist yet */
   }
   return { ...DEFAULT_SETTINGS };
 }
 
-export async function saveSettings(env: Env, next: InstanceSettings): Promise<InstanceSettings> {
-  const settings = parseSettings(JSON.stringify(next));
-  const db = drizzle(env.DB, { schema });
-  await db
-    .insert(schema.siteSettings)
-    .values({ key: "settings", valueJson: JSON.stringify(settings) })
-    .onConflictDoUpdate({ target: schema.siteSettings.key, set: { valueJson: JSON.stringify(settings) } });
-  return settings;
+// Settings share one JSON row with the secret registry, which gates every secret
+// resolution. Each writer changes only its own keys in a single statement, so
+// concurrent requests cannot write a stale copy of the row over each other.
+// An unreadable row counts as empty, the same way parseSettings reads it.
+const SETTINGS_ROW_JSON =
+  "CASE WHEN json_valid(site_settings.value_json) THEN" +
+  " CASE WHEN json_type(site_settings.value_json) = 'object' THEN site_settings.value_json ELSE '{}' END" +
+  " ELSE '{}' END";
+
+export type SettingsPatch = Partial<Omit<InstanceSettings, "secrets">>;
+
+export async function updateSettings(env: Env, patch: SettingsPatch): Promise<InstanceSettings> {
+  const clean = parseSettings(JSON.stringify({ ...DEFAULT_SETTINGS, ...patch }));
+  const changes: SettingsPatch = {};
+  for (const key of ["siteName", "homepageUrl", "publicUrl", "iconUpdatedAt", "globe"] as const) {
+    if (patch[key] !== undefined) Object.assign(changes, { [key]: clean[key] });
+  }
+  if (Object.keys(changes).length > 0) {
+    // json_patch is a merge patch: a null value drops the key, which reads back as null.
+    await env.DB.prepare(`INSERT INTO site_settings (key, value_json) VALUES ('settings', ?)
+      ON CONFLICT(key) DO UPDATE SET value_json = json_patch(${SETTINGS_ROW_JSON}, excluded.value_json)`)
+      .bind(JSON.stringify(changes))
+      .run();
+  }
+  return readSettings(env);
 }
 
 export async function rememberSecretNames(env: Env, names: string[]): Promise<void> {
-  const valid = names.filter((n) => /^[A-Z][A-Z0-9_]{0,127}$/.test(n));
+  const valid = [...new Set(names.filter((n) => SECRET_NAME_RE.test(n) && !isReservedSecretName(n)))];
   if (!valid.length) return;
-  const current = await loadSettings(env);
-  await saveSettings(env, { ...current, secrets: [...new Set([...current.secrets, ...valid])].sort() });
+  const known = new Set((await readSettings(env)).secrets);
+  if (valid.every((n) => known.has(n))) return;
+  await env.DB.prepare(`INSERT INTO site_settings (key, value_json) VALUES ('settings', json_object('secrets', json(?)))
+    ON CONFLICT(key) DO UPDATE SET value_json = json_set(${SETTINGS_ROW_JSON}, '$.secrets', json((
+      SELECT json_group_array(value) FROM (
+        SELECT value FROM json_each(${SETTINGS_ROW_JSON}, '$.secrets')
+        UNION
+        SELECT value FROM json_each(excluded.value_json, '$.secrets')
+      )
+    )))`)
+    .bind(JSON.stringify(valid))
+    .run();
+}
+
+export async function forgetSecretName(env: Env, name: string): Promise<void> {
+  await env.DB.prepare(`UPDATE site_settings SET value_json = json_set(${SETTINGS_ROW_JSON}, '$.secrets', json((
+      SELECT json_group_array(value) FROM json_each(${SETTINGS_ROW_JSON}, '$.secrets') WHERE value <> ?
+    )))
+    WHERE key = 'settings'`)
+    .bind(name)
+    .run();
 }
 
 type StoredIcon = { mime: string; b64: string; updatedAt: number };
@@ -194,23 +248,24 @@ export async function saveIcon(env: Env, bytes: Uint8Array): Promise<InstanceSet
       target: schema.siteSettings.key,
       set: { valueJson: JSON.stringify({ mime, b64: toBase64(bytes), updatedAt } satisfies StoredIcon) },
     });
-  const current = await loadSettings(env);
-  return saveSettings(env, { ...current, iconUpdatedAt: updatedAt });
+  return updateSettings(env, { iconUpdatedAt: updatedAt });
 }
 
 export async function deleteIcon(env: Env): Promise<InstanceSettings> {
   const db = drizzle(env.DB, { schema });
   await db.delete(schema.siteSettings).where(eq(schema.siteSettings.key, ICON_KEY));
-  const current = await loadSettings(env);
-  return saveSettings(env, { ...current, iconUpdatedAt: null });
+  return updateSettings(env, { iconUpdatedAt: null });
 }
 
-export async function isStale(env: Env, now = Date.now()): Promise<{ stale: boolean; lastTick: number | null }> {
+type MaintenanceWindow = { componentId: string; startAt: number; endAt: number };
+
+export function isStale(
+  monitors: Array<typeof schema.monitors.$inferSelect>,
+  latest: Array<typeof schema.checkLatest.$inferSelect>,
+  windows: MaintenanceWindow[],
+  now = Date.now(),
+): { stale: boolean; lastTick: number | null } {
   try {
-    const db = drizzle(env.DB, { schema });
-    const monitors = await db.select().from(schema.monitors);
-    const latest = await db.select().from(schema.checkLatest);
-    const windows = await db.select().from(schema.maintenance);
     const active = monitors.filter((m) => {
       if (m.mutedUntil && m.mutedUntil > now) return false;
       return !windows.some((w) => w.componentId === m.componentId && w.startAt <= now && now < w.endAt);
@@ -348,7 +403,6 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
   const db = drizzle(env.DB, { schema });
   const settings = await loadSettings(env);
   const siteName = settings.siteName;
-  const { stale, lastTick } = await isStale(env);
   const monitors = await db.select().from(schema.monitors);
   const now = Date.now();
   let windows: Array<{ id: string; componentId: string; startAt: number; endAt: number; note: string }> = [];
@@ -365,6 +419,7 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
   }
   const activeMaintenance = new Set(windows.filter((w) => w.startAt <= now && now < w.endAt).map((w) => w.componentId));
   const latest = await db.select().from(schema.checkLatest);
+  const { stale, lastTick } = isStale(monitors, latest, windows, now);
   const dates = daysBack(90);
   const uptime = await db.select().from(schema.dailyUptime).where(gte(schema.dailyUptime.date, dates[0]!));
   const historyStart = Date.parse(`${dates[0]}T00:00:00.000Z`);
@@ -433,16 +488,16 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
       });
       const rows = uptime.filter((u) => u.componentId === cid);
       const byDate = new Map(rows.map((u) => [u.date, u]));
+      const affectingIncidents = incidentScopes
+        .filter(({ componentIds }) => componentIds.includes(cid))
+        .map(({ incident }) => incident);
+      const outages = affectingIncidents
+        .filter((incident) => incident.impact === "failing")
+        .map((incident) => ({ start: incident.createdAt, end: incident.resolvedAt ?? now }));
       const days = dates.map((date) => {
         const u = byDate.get(date);
         const dayStart = Date.parse(`${date}T00:00:00.000Z`);
         const dayEnd = Math.min(dayStart + 86_400_000, now);
-        const affectingIncidents = incidentScopes
-          .filter(({ componentIds }) => componentIds.includes(cid))
-          .map(({ incident }) => incident);
-        const outages = affectingIncidents
-          .filter((incident) => incident.impact === "failing")
-          .map((incident) => ({ start: incident.createdAt, end: incident.resolvedAt ?? now }));
         const downtimeMs = overlapDuration(outages, dayStart, dayEnd);
         const overlapsDay = (incident: typeof incidentsAll[number]) =>
           incident.createdAt < dayEnd && (incident.resolvedAt ?? now) > dayStart;
@@ -613,29 +668,70 @@ export async function buildPublicSnapshot(env: Env): Promise<PublicSnapshot> {
   });
 }
 
-export async function publishSnapshot(env: Env): Promise<PublicSnapshot> {
+// The cron tick republishes every minute. The KV entry outlives that by a wide
+// margin so a late tick does not empty the cache; readers judge age themselves.
+const SNAPSHOT_TTL_S = 600;
+const SNAPSHOT_MAX_AGE_MS = 150_000;
+const REBUILD_BACKOFF_MS = 15_000;
+const rebuildFailedAt = new WeakMap<object, number>();
+
+export async function publishSnapshot(env: Env, opts: { retry?: boolean } = {}): Promise<PublicSnapshot> {
   const snap = await buildPublicSnapshot(env);
-  await env.STATUS.put("snapshot:public", JSON.stringify(snap), { expirationTtl: 60 });
   try {
-    await statusHubStub(env).push(renderLivePayload(snap));
-  } catch {
-    /* live fan-out is best-effort; the HTML page still works */
+    await env.STATUS.put("snapshot:public", JSON.stringify(snap), { expirationTtl: SNAPSHOT_TTL_S });
+  } catch (error) {
+    // KV limits writes to one key to about one per second. The snapshot is
+    // built and the change it reflects is saved, so the caller must not fail.
+    console.error("snapshot cache write failed", error);
+    if (opts.retry !== false) {
+      try {
+        const scheduler = env.SCHEDULER.get(env.SCHEDULER.idFromName("main")) as DurableObjectStub<Scheduler>;
+        await scheduler.requestPublish();
+      } catch {
+        /* the next scheduled tick publishes again */
+      }
+    }
+  }
+  try {
+    await statusHubStub(env).push(liveNotice(renderLivePayload(snap)));
+  } catch (error) {
+    // Live fan-out is best-effort; the HTML page and the live.json poll still work.
+    console.error("live push failed", error);
   }
   return snap;
 }
 
-export async function readSnapshot(env: Env): Promise<PublicSnapshot> {
-  const cached = await env.STATUS.get("snapshot:public");
-  if (cached) {
-    const parsed = JSON.parse(cached) as PublicSnapshot;
-    return publicSnapshot({
-      ...parsed,
-      maintenance: parsed.maintenance ?? [],
-      observers: parsed.observers ?? [],
-      incidents: parsed.incidents.map((incident) => ({ ...incident, componentIds: incident.componentIds ?? [] })),
-    });
+/** `onEmpty` runs when nothing is cached at all, which is how a first request after deploy looks. */
+export async function readSnapshot(env: Env, onEmpty?: () => void): Promise<PublicSnapshot> {
+  let cached: string | null = null;
+  try {
+    cached = await env.STATUS.get("snapshot:public");
+    if (!cached) onEmpty?.();
+  } catch (error) {
+    console.error("snapshot cache read failed", error);
   }
-  return publishSnapshot(env);
+  if (!cached) return publishSnapshot(env);
+  const parsed = JSON.parse(cached) as PublicSnapshot;
+  const snapshot = publicSnapshot({
+    ...parsed,
+    maintenance: parsed.maintenance ?? [],
+    observers: parsed.observers ?? [],
+    incidents: parsed.incidents.map((incident) => ({ ...incident, componentIds: incident.componentIds ?? [] })),
+  });
+  const now = Date.now();
+  if (now - parsed.generatedAt < SNAPSHOT_MAX_AGE_MS) return snapshot;
+  // After a failed rebuild, visitors do not each retry it against a database that is down.
+  if (now - (rebuildFailedAt.get(env.STATUS) ?? 0) >= REBUILD_BACKOFF_MS) {
+    try {
+      return await publishSnapshot(env);
+    } catch (error) {
+      rebuildFailedAt.set(env.STATUS, now);
+      console.error("snapshot rebuild failed, serving the cached copy", error);
+    }
+  }
+  // The database cannot be read. An old page that says it is old beats an
+  // error page, and the copy is kept in the cache for exactly this case.
+  return { ...snapshot, stale: true };
 }
 
 export async function loadPublicIncident(env: Env, id: string, snap?: PublicSnapshot): Promise<PublicIncident | null> {
@@ -707,12 +803,4 @@ export async function bumpUptime(
       END`)
     .bind(componentId, date, ok ? 1 : 0, addSum, addCount, addMin, addMax)
     .run();
-}
-
-export async function writeLastTick(env: Env, now = Date.now()): Promise<void> {
-  const db = drizzle(env.DB, { schema });
-  await db
-    .insert(schema.meta)
-    .values({ key: "last_tick", value: String(now) })
-    .onConflictDoUpdate({ target: schema.meta.key, set: { value: String(now) } });
 }

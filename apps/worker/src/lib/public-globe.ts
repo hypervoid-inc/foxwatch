@@ -18,8 +18,8 @@ export const GLOBE_CLIENT_SCRIPT = `(function(){
   };
   var canvas, ctx, labels, lctx, dpr=1, w=0, h=0, cx=0, cy=0, radius=0;
   var yaw=0.35, pitch=0.22, vYaw=0, vPitch=0, raf=0, dragging=false, moved=false;
-  var lastX=0, lastY=0, lastT=0, pointerId=null, lastTick=0;
-  var land=[], nodes=[], arcs=[], you=null, youTo=null, hot=null, looking=false, aimedYou=false;
+  var lastX=0, lastY=0, lastT=0, pointerId=null, lastTick=0, lastDraw=0;
+  var land=[], nodes=[], arcs=[], you=null, youTo=null, hot=null, looking=false, aimedYou=false, touched=false;
   var reduce=false, spinning=false, spinT=0, idleTimer=0;
   var mq=window.matchMedia("(min-width: 1100px) and (hover: hover) and (pointer: fine)");
   var reduceMq=window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -27,6 +27,7 @@ export const GLOBE_CLIENT_SCRIPT = `(function(){
   var SPIN=0.000062;
   var SPIN_IN_MS=1200;
   var SPIN_OUT_MS=420;
+  var CRUISE_MS=30;
   var HOP_LIFT=0.16;
   var HOP_STEPS=40;
   function desktop(){ return mq.matches; }
@@ -138,8 +139,10 @@ export const GLOBE_CLIENT_SCRIPT = `(function(){
       youTo=best;
     }
     if (you && !aimedYou){
-      yaw=-you.lng*Math.PI/180;
-      pitch=clamp(you.lat*Math.PI/180*0.55, -0.95, 0.95);
+      if (!touched){
+        yaw=-you.lng*Math.PI/180;
+        pitch=clamp(you.lat*Math.PI/180*0.55, -0.95, 0.95);
+      }
       aimedYou=true;
       looking=true;
     } else if (!looking && nodes[0]){
@@ -562,6 +565,7 @@ export const GLOBE_CLIENT_SCRIPT = `(function(){
     now=now||performance.now();
     var dt=lastTick?Math.min(48, now-lastTick):16;
     lastTick=now;
+    var glide=!dragging && Math.abs(vYaw)+Math.abs(vPitch)>0.0004;
     if (reduce){
       spinning=false; spinT=0; vYaw=0; vPitch=0;
     } else {
@@ -575,9 +579,10 @@ export const GLOBE_CLIENT_SCRIPT = `(function(){
       }
       if (spinT>0) yaw+=SPIN*dt*spinEase(spinT);
     }
-    paint();
-    if (!reduce && (spinT>0.0005 || spinning || (!dragging && Math.abs(vYaw)+Math.abs(vPitch)>0.0004)))
-      raf=requestAnimationFrame(tick);
+    var again=!reduce && (spinT>0.0005 || spinning || (!dragging && Math.abs(vYaw)+Math.abs(vPitch)>0.0004));
+    /* Idle spin alone turns the globe well under a pixel a frame, so it is drawn at about 30 a second. A drag, a glide and the last frame are always drawn. */
+    if (!again || dragging || glide || now-lastDraw>=CRUISE_MS){ lastDraw=now; paint(); }
+    if (again) raf=requestAnimationFrame(tick);
     else lastTick=0;
   }
   function onDown(e){
@@ -597,7 +602,7 @@ export const GLOBE_CLIENT_SCRIPT = `(function(){
     if (dragging){
       var dt=Math.max(8, (e.timeStamp||Date.now())-lastT);
       var dx=e.clientX-lastX, dy=e.clientY-lastY;
-      if (Math.abs(dx)+Math.abs(dy)>3) moved=true;
+      if (Math.abs(dx)+Math.abs(dy)>3){ moved=true; touched=true; }
       var k=1.15/Math.max(80, radius);
       var dyaw=dx*k, dpitch=dy*k;
       yaw+=dyaw; pitch=clamp(pitch+dpitch, -0.95, 0.95);

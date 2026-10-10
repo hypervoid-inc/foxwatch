@@ -120,7 +120,7 @@ export function Checks({
               const freshLatest = m.latest.filter((latest) => latest.checkedAt >= freshAfter);
               const muted = m.mutedUntil != null && m.mutedUntil > Date.now();
               const expected = m.type === "heartbeat" ? ["global"] : Array.isArray(m.config.regions) ? m.config.regions.map(String) : [];
-              const worst = muted ? "empty" : freshLatest.some((l) => l.outcome === "fail") ? "bad" : freshLatest.some((l) => l.outcome === "degraded") ? "warn" : freshLatest.length ? "ok" : "empty";
+              const worst = muted ? "empty" : freshLatest.some((l) => l.outcome === "fail") ? "bad" : freshLatest.some((l) => l.outcome === "degraded") ? "warn" : freshLatest.some((l) => l.outcome !== "pending") ? "ok" : "empty";
               const confirming = freshLatest.some((latest) => latest.outcome === "fail") && m.confirmedOutcome !== "fail";
               const isSelected = selected === m.id;
               return (
@@ -205,21 +205,21 @@ export function Checks({
       <aside className="aside-panel flex flex-col gap-5">
         {selected === "new" || editing ? (
           <CheckForm
+            key={selected}
             monitor={selected === "new" ? null : editing}
+            monitors={monitors}
             secrets={secrets}
-            onDone={async () => {
-              await onChange();
-              setSelected(null);
-            }}
+            onSaved={onChange}
+            onClose={(saved) => setSelected((current) => (current === saved ? null : current))}
             onCancel={() => setSelected(null)}
           />
         ) : (
           <div className="card px-5 py-8 text-center text-sm text-muted">Select a check to edit, or create a new one.</div>
         )}
         {editing?.componentId ? (
-          <MaintenanceCard componentId={editing.componentId} componentName={editing.componentName} onChange={onChange} />
+          <MaintenanceCard key={editing.componentId} componentId={editing.componentId} componentName={editing.componentName} onChange={onChange} />
         ) : null}
-        {editing ? <RunHistory monitor={editing} /> : null}
+        {editing ? <RunHistory key={editing.id} monitor={editing} /> : null}
       </aside>
       <ConfirmDialog
         open={pendingDelete != null}
@@ -265,19 +265,27 @@ function RunHistory({ monitor }: { monitor: MonitorRow }) {
   const [runs, setRuns] = useState<Latest[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // `latest` is a new array on every overview poll. Only a newer probe is a reason to fetch again.
+  const latestAt = Math.max(0, ...monitor.latest.map((l) => l.checkedAt));
+
+  // Keyed by check, so "Loading…" shows once per check and a refresh swaps the rows in place.
   useEffect(() => {
-    setLoading(true);
+    let cancelled = false;
     void api<{ runs: Latest[] }>(`/api/ops/monitors/${monitor.id}/runs?limit=5`).then((res) => {
+      if (cancelled) return;
       if (res.ok) setRuns(res.data.runs);
       setLoading(false);
     });
-  }, [monitor.id, monitor.latest]);
+    return () => {
+      cancelled = true;
+    };
+  }, [monitor.id, latestAt]);
 
   return (
     <section className="card overflow-hidden">
       <div className="px-5 py-4">
         <h2 className="section-title">Recent runs</h2>
-        <p className="section-copy">Last 5 probes. Confirmed after {Number(monitor.config.confirmFails ?? 3)} consecutive failures.</p>
+        <p className="section-copy">Last 5 probes. Confirmed after {Number(monitor.config.confirmFails ?? 3)} consecutive failures; recovery after 2 consecutive passes.</p>
       </div>
       {loading ? <p className="empty-note">Loading…</p> : runs.length === 0 ? <p className="empty-note">No runs recorded yet.</p> : (
         <ul className="border-t border-line">
@@ -365,18 +373,17 @@ function MaintenanceCard({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  async function refresh() {
-    const res = await api<{ window: MaintenanceWindow | null; windows: MaintenanceWindow[] }>(`/api/ops/components/${componentId}/maintenance`);
-    if (!res.ok) return;
-    setWindows(res.data.windows);
-  }
-
+  // Keyed by component, so another component's windows are never shown with live buttons.
   useEffect(() => {
-    setError(null);
-    setNote("");
-    setStartAt(toLocalInput(Date.now() + 5 * 60 * 1000));
-    setEndAt(toLocalInput(Date.now() + 2 * 60 * 60 * 1000));
-    void refresh();
+    let cancelled = false;
+    void api<{ window: MaintenanceWindow | null; windows: MaintenanceWindow[] }>(`/api/ops/components/${componentId}/maintenance`).then((res) => {
+      if (cancelled) return;
+      if (res.ok) setWindows(res.data.windows);
+      else setError("Could not load maintenance windows.");
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [componentId]);
 
   async function start(e: React.FormEvent) {

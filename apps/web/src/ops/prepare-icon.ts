@@ -17,10 +17,10 @@ export function isFileDrag(e: { dataTransfer: DataTransfer | null }): boolean {
   return Array.from(e.dataTransfer?.types ?? []).includes("Files");
 }
 
+/** The first image in a drop. A drop with no image in it is not an icon and is ignored. */
 export function fileFromDrop(dt: DataTransfer | null): File | null {
   if (!dt?.files.length) return null;
-  const files = [...dt.files];
-  return files.find(isImageFile) ?? files[0] ?? null;
+  return [...dt.files].find(isImageFile) ?? null;
 }
 
 function sniffAllowed(bytes: Uint8Array): boolean {

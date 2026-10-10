@@ -24,6 +24,15 @@ function ensureUserAgent(headers: Record<string, string>): Record<string, string
   return { ...headers, "User-Agent": DEFAULT_PROBE_USER_AGENT };
 }
 
+/** Requests per run: the first one plus up to five redirects. */
+const MAX_HOPS = 6;
+/** Headers that describe a request body; they go when a redirect drops the body. */
+const BODY_HEADERS = new Set(["content-type", "content-length", "content-encoding", "content-language", "content-location"]);
+
+function withoutBodyHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).filter(([name]) => !BODY_HEADERS.has(name.toLowerCase())));
+}
+
 async function readBody(res: Response): Promise<string> {
   const reader = res.body?.getReader();
   if (!reader) return "";
@@ -122,21 +131,26 @@ export async function runHttpProbe(
   }
   headersForHop = { headers: ensureUserAgent(headersForHop.headers) };
 
+  let method = check.method ?? "GET";
+  let body = check.method === "POST" ? check.body : undefined;
+  let bodyDropped = false;
   let last: Response | null = null;
   const requestController = new AbortController();
   const requestTimeout = setTimeout(() => requestController.abort(), check.timeoutMs);
   try {
-    for (let hop = 0; hop < 6; hop++) {
+    for (let hop = 0; hop < MAX_HOPS; hop++) {
       last = await opts.fetchImpl(current.toString(), {
-        method: check.method ?? "GET",
+        method,
         headers: headersForHop.headers,
-        body: check.method === "POST" ? check.body : undefined,
+        body,
         redirect: "manual",
         signal: requestController.signal,
       });
 
       const loc = last.headers.get("Location");
       if (check.followRedirects && loc && last.status >= 300 && last.status < 400) {
+        // Nothing reads a redirect's body; let the connection go.
+        await last.body?.cancel().catch(() => undefined);
         const next = new URL(loc, current);
         try {
           assertSafeUrl(next.toString(), { allowHttpLocal: opts.allowHttpLocal });
@@ -158,6 +172,22 @@ export async function runHttpProbe(
             errorClass: "redirect_host",
           };
         }
+        if (hop === MAX_HOPS - 1) {
+          // Still redirecting at the cap: a loop, not a response to assert on.
+          return {
+            outcome: "fail",
+            latencyMs: Date.now() - started,
+            statusCode: last.status,
+            colo,
+            errorClass: "redirect",
+          };
+        }
+        // As fetch does: 303 always, and 301/302 after a POST, continue as a GET with no body.
+        if ((last.status === 303 && method !== "HEAD") || ((last.status === 301 || last.status === 302) && method === "POST")) {
+          method = "GET";
+          body = undefined;
+          bodyDropped = true;
+        }
         current = next;
         headersForHop = resolveHeaders(
           check.headers as Record<string, string | SecretRef>,
@@ -165,7 +195,9 @@ export async function runHttpProbe(
           current.hostname,
           check.allowedHosts,
         );
-        headersForHop = { headers: ensureUserAgent(headersForHop.headers) };
+        headersForHop = {
+          headers: ensureUserAgent(bodyDropped ? withoutBodyHeaders(headersForHop.headers) : headersForHop.headers),
+        };
         continue;
       }
       break;
@@ -175,12 +207,12 @@ export async function runHttpProbe(
       return { outcome: "fail", latencyMs: Date.now() - started, statusCode: null, colo, errorClass: "connect" };
     }
 
-    const body = await readBody(last);
+    const responseBody = await readBody(last);
     const latencyMs = Date.now() - started;
     const evald = evaluateHttp({
       status: last.status,
       headers: headerMap(last.headers),
-      body,
+      body: responseBody,
       latencyMs,
       expect: check.expect,
       timeoutMs: check.timeoutMs,
@@ -192,8 +224,8 @@ export async function runHttpProbe(
       statusCode: last.status,
       colo,
       errorClass: evald.errorClass,
-      errorSnippet: evald.outcome === "pass" ? undefined : redactText(body, secretValues),
-      responseSnippet: redactText(body, secretValues).slice(0, 2000),
+      errorSnippet: evald.outcome === "pass" ? undefined : redactText(responseBody, secretValues),
+      responseSnippet: redactText(responseBody, secretValues).slice(0, 2000),
     };
   } catch (err) {
     const aborted = err instanceof Error && err.name === "AbortError";

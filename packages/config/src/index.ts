@@ -38,9 +38,22 @@ export const SECRET_REF = "__foxwatch_secret__" as const;
 
 export type SecretRef = { [SECRET_REF]: string };
 
+export const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
+
+/**
+ * Worker bindings that configure Foxwatch itself (and can manage the Worker).
+ * They are never usable as a check header or alert channel secret.
+ */
+export function isReservedSecretName(name: string): boolean {
+  return name === "ALLOW_HTTP_LOCAL" || name === "FOXWATCH_SETUP_TOKEN" || name.startsWith("FOXWATCH_CF_");
+}
+
 export function secret(name: string): SecretRef {
-  if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name)) {
+  if (!SECRET_NAME_RE.test(name)) {
     throw new Error(`Invalid secret name "${name}". Use UPPER_SNAKE_CASE.`);
+  }
+  if (isReservedSecretName(name)) {
+    throw new Error(`Secret name "${name}" is reserved for Foxwatch configuration.`);
   }
   return { [SECRET_REF]: name };
 }
@@ -56,6 +69,29 @@ export function isSecretRef(value: unknown): value is SecretRef {
 
 export function secretName(value: unknown): string | null {
   return isSecretRef(value) ? value[SECRET_REF] : null;
+}
+
+const BLOCKED_HEADERS = new Set([
+  "host",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "cookie2",
+  "set-cookie",
+]);
+
+/**
+ * Request headers the probe never sends: hop-by-hop, response-only, and the
+ * ones Cloudflare sets itself. Cookie is allowed, as a secret ref.
+ */
+export function isBlockedHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return BLOCKED_HEADERS.has(lower) || lower.startsWith("cf-") || lower.startsWith("x-forwarded");
 }
 
 export const ASSERTION_OPS = [
@@ -81,6 +117,43 @@ export type Assertion = {
 };
 
 export const MAX_ASSERTIONS = 20;
+/** Limits the API, the config loader and the probe all enforce, so a check that saves also runs. */
+export const MAX_JSONPATH_LENGTH = 256;
+export const MAX_BODY_INCLUDES_LENGTH = 8192;
+export const MAX_ASSERTION_VALUE_LENGTH = 256;
+
+const JSONPATH_SEGMENT = /\.([A-Za-z0-9_]+)|\.?\[(\d+)\]|\['((?:[^'\\]|\\[\s\S])*)'\]|\["((?:[^"\\]|\\[\s\S])*)"\]/y;
+
+/**
+ * The JSONPath subset checks support: `$.key`, `$.list[0]`, `$['any key']`.
+ * Throws `jsonpath_invalid` on anything else, so an unsupported segment can
+ * never be skipped and leave an assertion looking at the wrong value.
+ * Three spellings older checks were saved with still read the same value:
+ * `$key` for `$.key`, a dot before an index (`$.list.[0]`), and one trailing dot.
+ */
+export function parseJsonPath(path: unknown): Array<string | number> {
+  if (typeof path !== "string" || !path.startsWith("$") || path.length > MAX_JSONPATH_LENGTH) {
+    throw new Error("jsonpath_invalid");
+  }
+  const parts: Array<string | number> = [];
+  const end = path.endsWith(".") && !path.endsWith("..") ? path.length - 1 : path.length;
+  let at = 1;
+  const bare = /^[A-Za-z0-9_]+/.exec(path.slice(1, end));
+  if (bare) {
+    parts.push(bare[0]);
+    at += bare[0].length;
+  }
+  while (at < end) {
+    JSONPATH_SEGMENT.lastIndex = at;
+    const m = JSONPATH_SEGMENT.exec(path);
+    if (!m) throw new Error("jsonpath_invalid");
+    if (m[1] != null) parts.push(m[1]);
+    else if (m[2] != null) parts.push(Number(m[2]));
+    else parts.push((m[3] ?? m[4] ?? "").replace(/\\([\s\S])/g, "$1"));
+    at = JSONPATH_SEGMENT.lastIndex;
+  }
+  return parts;
+}
 
 export type HttpExpect = {
   status?: number | number[];
@@ -297,6 +370,36 @@ export type DefineConfigInput = {
   alerts?: AlertChannelDef[];
 };
 
+/** Reject expectations the probe would refuse at run time. */
+function assertExpectRuns(check: HttpCheck) {
+  const expect = check.expect;
+  if (typeof expect.bodyIncludes === "string" && expect.bodyIncludes.length > MAX_BODY_INCLUDES_LENGTH) {
+    throw new Error(`check ${check.id} bodyIncludes must be <= ${MAX_BODY_INCLUDES_LENGTH} characters`);
+  }
+  const paths = [
+    ...(expect.jsonPath ? [expect.jsonPath.path] : []),
+    ...(Array.isArray(expect.assertions) ? expect.assertions.map((a) => a.path) : []),
+  ];
+  for (const path of paths) {
+    try {
+      parseJsonPath(path);
+    } catch {
+      throw new Error(
+        `check ${check.id} JSON path ${JSON.stringify(path)} is not supported: use $.key, $.list[0] or $['any key'], up to ${MAX_JSONPATH_LENGTH} characters`,
+      );
+    }
+  }
+  for (const a of Array.isArray(expect.assertions) ? expect.assertions : []) {
+    if (
+      (a.op === "contains" || a.op === "not_contains" || a.op === "matches") &&
+      typeof a.value === "string" &&
+      a.value.length > MAX_ASSERTION_VALUE_LENGTH
+    ) {
+      throw new Error(`check ${check.id} assertion value for ${a.op} must be <= ${MAX_ASSERTION_VALUE_LENGTH} characters`);
+    }
+  }
+}
+
 function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackRegions: Region[]): Check {
   if (check.type === "heartbeat") {
     if (check.intervalMs < MIN_INTERVAL_MS || check.intervalMs > MAX_INTERVAL_MS) {
@@ -331,6 +434,7 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
   if (Object.keys(check.headers).length > 50) throw new Error(`check ${check.id} has too many headers`);
   for (const [name, value] of Object.entries(check.headers)) {
     if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(name)) throw new Error(`check ${check.id} has an invalid header name`);
+    if (isBlockedHeader(name)) throw new Error(`check ${check.id} header ${name} is set by the network and cannot be sent`);
     if (typeof value === "string" && value.length > 8192) throw new Error(`check ${check.id} header value is too large`);
     if (/authorization|proxy-authorization|api[-_]?key|token|secret|cookie/i.test(name) && typeof value === "string") {
       throw new Error(`check ${check.id} sensitive header ${name} must use secret()`);
@@ -343,6 +447,7 @@ function fillCheck(check: Check, defaults: FoxwatchConfig["defaults"], fallbackR
   if (degradedIf && degradedIf.latencyMs >= timeoutMs) {
     throw new Error(`check ${check.id} degrade-above must be below timeout`);
   }
+  assertExpectRuns(check);
   return {
     ...check,
     regions,

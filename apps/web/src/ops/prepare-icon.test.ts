@@ -22,4 +22,11 @@ describe("site icon prep", () => {
     } as unknown as DataTransfer;
     expect(fileFromDrop(dt)?.name).toBe("brand.heic");
   });
+
+  it("ignores a drop with no image in it", () => {
+    const dt = { files: [new File([], "readme.txt"), new File([], "notes.pdf")] } as unknown as DataTransfer;
+    expect(fileFromDrop(dt)).toBeNull();
+    expect(fileFromDrop({ files: [] } as unknown as DataTransfer)).toBeNull();
+    expect(fileFromDrop(null)).toBeNull();
+  });
 });

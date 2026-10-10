@@ -1,6 +1,10 @@
 import { tokenEquals } from "../lib/crypto.ts";
 
 // Production Workers still throw above 100k PBKDF2 iterations (workerd DoS cap).
+// Chaining several derivations would get past the cap, but each 100k round is
+// already a large share of a request's CPU allowance on the free plan, so the
+// count stays at the ceiling. `passwordNeedsRehash` is the upgrade path when
+// either limit moves.
 export const PBKDF2_ITERATIONS = 100_000;
 const HASH_PREFIX = "pbkdf2-sha256";
 
@@ -40,8 +44,24 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const salt = hexToBytes(parts[2] ?? "");
   const expected = parts[3] ?? "";
   if (!Number.isInteger(iterations) || iterations < 1 || iterations > 2_000_000 || !salt || !expected) return false;
-  const derived = await pbkdf2(password, salt, iterations);
+  let derived: Uint8Array;
+  try {
+    derived = await pbkdf2(password, salt, iterations);
+  } catch (err) {
+    // The runtime refuses counts above its cap (a restored or hand-seeded hash).
+    // That is a failed sign-in, not a server error.
+    console.error(`password hash with ${iterations} iterations could not be verified`, err);
+    return false;
+  }
   return tokenEquals(bytesToHex(derived), expected);
+}
+
+/** True for a hash that verifies but is weaker than what `hashPassword` writes now. */
+export function passwordNeedsRehash(stored: string): boolean {
+  const parts = stored.split("$");
+  if (parts.length !== 4 || parts[0] !== HASH_PREFIX) return false;
+  const iterations = Number(parts[1]);
+  return Number.isInteger(iterations) && iterations >= 1 && iterations < PBKDF2_ITERATIONS;
 }
 
 let dummyHashPromise: Promise<string> | null = null;

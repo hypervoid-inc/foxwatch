@@ -8,6 +8,7 @@ import {
   sampler,
   surface,
   target,
+  type Frame,
   type FrameLoopHandle,
   type Gpu,
   type Surface,
@@ -20,8 +21,18 @@ import planetWgsl from "./planet.wgsl";
 import probesWgsl from "./probes.wgsl";
 import arcsWgsl from "./arcs.wgsl";
 import blitWgsl from "./blit.wgsl";
-import { aimOrbit, bindOrbit, createOrbit, stepOrbit, type Orbit } from "./orbit.ts";
 import {
+  aimScene,
+  bindOrbit,
+  createOrbit,
+  CRUISE_MS,
+  orbitActive,
+  spinOnly,
+  stepOrbit,
+  type Orbit,
+} from "./orbit.ts";
+import {
+  globeBox,
   globeRotation,
   layoutGlobe,
   mat4Multiply,
@@ -32,6 +43,8 @@ import {
   bakeLand,
   hopSamples,
   kindColor,
+  MAX_HOPS,
+  MAX_PROBES,
   readLand,
   readScene,
   readTheme,
@@ -40,8 +53,6 @@ import {
   type GlobeScene,
 } from "./scene.ts";
 
-const MAX_HOPS = 512;
-const MAX_PROBES = 24;
 const HOP_STRIDE = 16;
 const PROBE_STRIDE = 8;
 const TRANSPARENT = [0, 0, 0, 0] as const;
@@ -60,13 +71,16 @@ function hex(c: [number, number, number]): string {
   return `#${to(c[0])}${to(c[1])}${to(c[2])}`;
 }
 
-export function mountGlobe(stage: HTMLElement): GlobeHandle {
+/** onLost runs once if the globe stops for good after it started: the device was lost, or a frame threw. It has been disposed by then. */
+export function mountGlobe(stage: HTMLElement, onLost?: () => void): GlobeHandle {
   let disposed = false;
+  let themeWatch: MutationObserver | undefined;
   let gpu: Gpu | undefined;
   let view: Surface | undefined;
   let sceneTarget: Target | undefined;
   let landTex: Texture | undefined;
   let loop: FrameLoopHandle | undefined;
+  let time: ReturnType<typeof clock> | undefined;
   let unbindPointer: (() => void) | undefined;
   let canvas: HTMLCanvasElement | undefined;
   let overlay: HTMLCanvasElement | undefined;
@@ -85,7 +99,6 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
   let theme = readTheme();
   let themeKey = isDarkTheme() ? "dark" : "light";
   let hot: string | null = null;
-  let looking = false;
   const orbit: Orbit = createOrbit();
   const hops = new Float32Array(MAX_HOPS * HOP_STRIDE);
   const probes = new Float32Array(MAX_PROBES * PROBE_STRIDE);
@@ -94,6 +107,14 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
   let cssW = 1;
   let cssH = 1;
   let layout = layoutGlobe(1, 1, 16);
+  let box = globeBox(layout, 1, 1);
+  let boxKey = "";
+  let labelKey = "";
+  let dpr = 1;
+  // The scene is drawn when something changed it, not once a frame: dirty is a change from outside, turned is the orbit having moved since the last draw.
+  let dirty = false;
+  let turned = false;
+  let drawnAt = 0;
   const mvp = new Float32Array(16);
   const model = new Float32Array(16);
 
@@ -105,22 +126,53 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
     throw error;
   };
 
+  // vgpu's loop does not reschedule itself after a throw, and every frame on a lost device throws, so either way the globe is over.
+  const lose = (error: unknown) => {
+    if (disposed) return;
+    console.error(error);
+    dispose();
+    onLost?.();
+  };
+
+  const pixelRatio = () => Math.min(2, window.devicePixelRatio || 1);
+
+  // Sizing the label canvas clears it and resets its context even when the size is the same, so it is sized only when the size changed.
+  const sizeLabels = () => {
+    if (!labels || !octx) return;
+    dpr = pixelRatio();
+    const w = Math.round(cssW * dpr);
+    const h = Math.round(cssH * dpr);
+    if (labels.width !== w || labels.height !== h) {
+      labels.width = w;
+      labels.height = h;
+    }
+    // Zoom halves the viewport as it doubles the pixel ratio, leaving the pixel size alone, so the CSS size is tracked on its own.
+    const key = `${cssW}:${cssH}`;
+    if (key !== labelKey) {
+      labelKey = key;
+      labels.style.width = `${cssW}px`;
+      labels.style.height = `${cssH}px`;
+    }
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+
+  /** Measures the viewport and places the globe in it. Run when the viewport can have changed, never once a frame. */
   const sizeOverlay = () => {
     if (!labels || !octx) return;
     cssW = Math.max(1, Math.round(document.documentElement.clientWidth || window.innerWidth));
     cssH = Math.max(1, Math.round(document.documentElement.clientHeight || window.innerHeight));
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    labels.width = Math.round(cssW * dpr);
-    labels.height = Math.round(cssH * dpr);
-    labels.style.width = `${cssW}px`;
-    labels.style.height = `${cssH}px`;
-    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (canvas) {
-      canvas.style.width = `${cssW}px`;
-      canvas.style.height = `${cssH}px`;
-    }
+    sizeLabels();
     const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
     layout = layoutGlobe(cssW, cssH, rem);
+    box = globeBox(layout, cssW, cssH);
+    const key = `${box.x}:${box.y}:${box.w}:${box.h}`;
+    if (canvas && key !== boxKey) {
+      boxKey = key;
+      canvas.style.left = `${box.x}px`;
+      canvas.style.top = `${box.y}px`;
+      canvas.style.width = `${box.w}px`;
+      canvas.style.height = `${box.h}px`;
+    }
     syncGutter(desktop() && !stage.hidden);
   };
 
@@ -279,6 +331,14 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
   const front = (v: { x: number; y: number; z: number }, minZ: number) =>
     rotateYawPitch(v, orbit.yaw, orbit.pitch).z >= minZ;
 
+  /** A point on the globe in viewport pixels: the camera covers the canvas, which sits at the box. */
+  const place = (v: { x: number; y: number; z: number }) => {
+    const p = project(v, mvp, box.w, box.h);
+    p.x += box.x;
+    p.y += box.y;
+    return p;
+  };
+
   const drawLabels = () => {
     if (!octx || !mesh || !labels?.isConnected) return;
     octx.clearRect(0, 0, cssW, cssH);
@@ -286,12 +346,12 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
       if (hot && n.id === hot) continue;
       if (n.kind !== "bad" && n.kind !== "warn") continue;
       if (!front(n.v, 0.28)) continue;
-      const p = project(n.v, mvp, cssW, cssH);
+      const p = place(n.v);
       if (!p.visible) continue;
       drawTag(p.x, p.y, n.label || n.id, "", hex(kindColor(n.kind, theme)));
     }
     if (mesh.you && (!hot || hot !== "you") && front(mesh.you.v, 0.28)) {
-      const p = project(mesh.you.v, mvp, cssW, cssH);
+      const p = place(mesh.you.v);
       if (p.visible) {
         let youSub = mesh.you.city || "";
         if (mesh.youTo) youSub = youSub ? `${youSub} · ${mesh.youTo.label}` : mesh.youTo.label;
@@ -299,14 +359,14 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
       }
     }
     if (hot === "you" && mesh.you && front(mesh.you.v, 0.08)) {
-      const p = project(mesh.you.v, mvp, cssW, cssH);
+      const p = place(mesh.you.v);
       if (p.visible) {
         drawTag(p.x, p.y, "You", mesh.you.city ? `${mesh.you.city}${mesh.youTo ? ` · nearest ${mesh.youTo.label}` : ""}` : "", tokenInk());
       }
     } else if (hot && mesh) {
       const n = mesh.nodes.find((node) => node.id === hot);
       if (n && front(n.v, 0.08)) {
-        const p = project(n.v, mvp, cssW, cssH);
+        const p = place(n.v);
         if (p.visible) drawTag(p.x, p.y, n.label || n.id, splitRead(n), hex(kindColor(n.kind, theme)));
       }
     }
@@ -321,7 +381,7 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
     let bestD = 40 * 40;
     for (const n of mesh.nodes) {
       if (!front(n.v, 0.1)) continue;
-      const p = project(n.v, mvp, cssW, cssH);
+      const p = place(n.v);
       const d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
       if (d < bestD) {
         bestD = d;
@@ -329,7 +389,7 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
       }
     }
     if (mesh.you && front(mesh.you.v, 0.1)) {
-      const p = project(mesh.you.v, mvp, cssW, cssH);
+      const p = place(mesh.you.v);
       const d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
       if (d < bestD) best = "you";
     }
@@ -341,7 +401,7 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
     hot = id;
     if (typeof window.__fwPickRegion === "function") window.__fwPickRegion(id && id !== "you" ? id : null);
     writeInstances();
-    drawLabels();
+    paint();
   };
 
   const nearGlobe = (e: PointerEvent) => {
@@ -357,14 +417,15 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
 
   const setFrame = () => {
     if (!planetDraw || !hopDraw || !probeDraw || !view || !cam) return;
-    sizeOverlay();
+    // A window dragged to another screen changes the pixel ratio without a resize.
+    if (pixelRatio() !== dpr) sizeLabels();
     const { cx, cy, radius } = layout;
     const r = Math.max(1, radius);
     cam.set({
-      left: -cx / r,
-      right: (cssW - cx) / r,
-      bottom: (cy - cssH) / r,
-      top: cy / r,
+      left: (box.x - cx) / r,
+      right: (box.x + box.w - cx) / r,
+      bottom: (cy - box.y - box.h) / r,
+      top: (cy - box.y) / r,
     });
     globeRotation(orbit.yaw, orbit.pitch, model);
     mat4Multiply(cam.viewProjection, model, mvp);
@@ -392,16 +453,80 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
     if (disposed || stage.hidden) return;
     const key = isDarkTheme() ? "dark" : "light";
     if (key !== themeKey) applyTheme();
+    dirty = true;
+    wake();
+  };
+
+  const tick = (currentFrame: Frame) => {
+    try {
+      drawFrame(currentFrame);
+    } catch (error) {
+      lose(error);
+    }
+  };
+
+  const drawFrame = (currentFrame: Frame) => {
+    if (disposed || !time || !view || !sceneTarget || !planetDraw || !hopDraw || !probeDraw || !blitDraw) return;
+    const dt = Math.min(48, time.deltaTime * 1000);
+    if (stepOrbit(orbit, dt, reduce())) turned = true;
+    const now = performance.now();
+    const skip = stage.hidden || (!dirty && (!turned || (spinOnly(orbit) && now - drawnAt < CRUISE_MS)));
+    if (skip) {
+      // Nothing to draw: the canvas keeps its last frame, and with nothing left to animate the loop stops until paint() wakes it.
+      currentFrame.cancel();
+      if (stage.hidden || (!dirty && !turned && !orbitActive(orbit))) rest();
+      return;
+    }
+    dirty = false;
+    turned = false;
+    drawnAt = now;
     setFrame();
+    currentFrame.pass({ target: sceneTarget, clear: TRANSPARENT }, (pass) => {
+      pass.draw(planetDraw!);
+      pass.draw(hopDraw!, { instances: hopCount });
+      pass.draw(probeDraw!, { instances: probeCount });
+    });
+    currentFrame.pass({ target: view, clear: TRANSPARENT }, (pass) => {
+      pass.draw(blitDraw!);
+    });
     drawLabels();
+    revealGlobe();
+  };
+
+  const resize = () => {
+    if (disposed || stage.hidden) return;
+    const radius = layout.radius;
+    sizeOverlay();
+    // Line widths and marker sizes are packed in units of the radius.
+    if (layout.radius !== radius) writeInstances();
+    paint();
+  };
+
+  const rest = () => {
+    loop?.stop();
+    loop = undefined;
+  };
+
+  const wake = () => {
+    if (loop || disposed || !gpu || !time || stage.hidden) return;
+    loop = frameLoop(gpu, tick);
   };
 
   const dispose = () => {
     if (disposed) return;
     disposed = true;
     unbindPointer?.();
-    loop?.stop();
-    gpu?.dispose();
+    mq.removeEventListener("change", refresh);
+    reduceMq.removeEventListener("change", refresh);
+    window.removeEventListener("resize", resize);
+    document.removeEventListener("visibilitychange", paint);
+    themeWatch?.disconnect();
+    rest();
+    try {
+      gpu?.dispose();
+    } catch {
+      /* a lost device has nothing left to release */
+    }
     canvas?.remove();
     overlay?.remove();
     labels?.remove();
@@ -420,15 +545,8 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
     }
     stage.hidden = false;
     stage.removeAttribute("aria-hidden");
-    if (!looking && mesh.you) {
-      aimOrbit(orbit, mesh.you.lat, mesh.you.lng);
-      looking = true;
-    } else if (!looking && mesh.nodes[0]) {
-      const lat0 = mesh.nodes.reduce((s, n) => s + n.lat, 0) / mesh.nodes.length;
-      const lng0 = mesh.nodes.reduce((s, n) => s + n.lng, 0) / mesh.nodes.length;
-      aimOrbit(orbit, lat0, lng0);
-      looking = true;
-    }
+    sizeOverlay();
+    aimScene(orbit, mesh.you, mesh.nodes);
     applyTheme();
     writeInstances();
     paint();
@@ -457,6 +575,8 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
     gpu.onError((err) => {
       console.error(err);
     });
+    // Disposing the globe destroys the device, which also settles this; lose() ignores that one.
+    void gpu.gpu.lost.then((info) => lose(new Error(`WebGPU device lost: ${info.message || info.reason}`)));
     cam = orthographicCamera({
       left: -1,
       right: 1,
@@ -481,6 +601,7 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
     });
     view.onResize((event) => {
       sceneTarget?.resize([event.width, event.height]);
+      dirty = true;
     });
 
     const planetGeo = geometry(gpu, sphere({ radius: 1, widthSegments: 128, heightSegments: 64 }));
@@ -569,32 +690,18 @@ export function mountGlobe(stage: HTMLElement): GlobeHandle {
       reduce,
     });
 
-    const time = clock(gpu);
-    loop = frameLoop(gpu, (currentFrame) => {
-      if (disposed || !view || !sceneTarget || !planetDraw || !hopDraw || !probeDraw || !blitDraw) return;
-      if (stage.hidden) return;
-      const dt = Math.min(48, time.deltaTime * 1000);
-      stepOrbit(orbit, dt, reduce());
-      setFrame();
-      currentFrame.pass({ target: sceneTarget, clear: TRANSPARENT }, (pass) => {
-        pass.draw(planetDraw!);
-        pass.draw(hopDraw!, { instances: hopCount });
-        pass.draw(probeDraw!, { instances: probeCount });
-      });
-      currentFrame.pass({ target: view, clear: TRANSPARENT }, (pass) => {
-        pass.draw(blitDraw!);
-      });
-      drawLabels();
-      revealGlobe();
-    });
+    time = clock(gpu);
 
     mq.addEventListener("change", refresh);
     reduceMq.addEventListener("change", refresh);
-    window.addEventListener("resize", paint);
-    new MutationObserver(() => {
+    window.addEventListener("resize", resize);
+    // A tab that comes back may have had its canvas dropped, and nothing redraws it unprompted now.
+    document.addEventListener("visibilitychange", paint);
+    themeWatch = new MutationObserver(() => {
       applyTheme();
       paint();
-    }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    });
+    themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     refresh();
   })().catch((error: unknown) => {
     if (disposed) return;

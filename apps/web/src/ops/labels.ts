@@ -23,6 +23,7 @@ export function outcomeLabel(outcome: string): string {
   if (outcome === "pass") return "passing";
   if (outcome === "fail") return "failing";
   if (outcome === "degraded") return "degraded";
+  if (outcome === "pending") return "waiting for first ping";
   return outcome;
 }
 

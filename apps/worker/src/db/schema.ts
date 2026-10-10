@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text, primaryKey } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, primaryKey } from "drizzle-orm/sqlite-core";
 
 export const monitors = sqliteTable("monitors", {
   id: text("id").primaryKey(),
@@ -15,6 +15,7 @@ export const monitors = sqliteTable("monitors", {
   mutedUntil: integer("muted_until"),
   consecutiveFails: integer("consecutive_fails").notNull().default(0),
   confirmedOutcome: text("confirmed_outcome").$type<"pass" | "degraded" | "fail">(),
+  consecutiveChanges: integer("consecutive_changes").notNull().default(0),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -52,6 +53,8 @@ export const componentState = sqliteTable("component_state", {
   componentId: text("component_id").primaryKey(),
   status: text("status").notNull(),
   updatedAt: integer("updated_at").notNull(),
+  pendingJson: text("pending_json"),
+  pendingLease: integer("pending_lease"),
 });
 
 export const dailyUptime = sqliteTable(
@@ -87,14 +90,14 @@ export const incidentUpdates = sqliteTable("incident_updates", {
   status: text("status").notNull(),
   body: text("body").notNull(),
   createdAt: integer("created_at").notNull(),
-});
+}, (t) => ({ byIncident: index("idx_incident_updates_incident").on(t.incidentId, t.createdAt) }));
 
 export const heartbeats = sqliteTable("heartbeats", {
   monitorId: text("monitor_id").primaryKey(),
   tokenHash: text("token_hash").notNull(),
   lastPingAt: integer("last_ping_at"),
   createdAt: integer("created_at").notNull(),
-});
+}, (t) => ({ byToken: index("idx_heartbeats_token").on(t.tokenHash) }));
 
 export const auditLog = sqliteTable("audit_log", {
   id: text("id").primaryKey(),
@@ -116,7 +119,7 @@ export const maintenance = sqliteTable("maintenance", {
   startAt: integer("start_at").notNull(),
   endAt: integer("end_at").notNull(),
   note: text("note").notNull(),
-});
+}, (t) => ({ byComponent: index("idx_maintenance_component").on(t.componentId, t.endAt) }));
 
 export const alertChannels = sqliteTable("alert_channels", {
   id: text("id").primaryKey(),

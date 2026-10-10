@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["node", "vite/client"]
+  },
+  "include": ["apps/worker/src/lib/public-globe.test.ts", "apps/web/src/index-css.test.ts", "apps/web/src/status-globe/wgsl.d.ts"],
+  "exclude": []
+}

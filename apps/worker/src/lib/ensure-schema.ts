@@ -14,6 +14,7 @@ const STATEMENTS = [
   muted_until INTEGER,
   consecutive_fails INTEGER NOT NULL DEFAULT 0,
   confirmed_outcome TEXT,
+  consecutive_changes INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 )`,
@@ -44,7 +45,9 @@ const STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS component_state (
   component_id TEXT PRIMARY KEY,
   status TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  pending_json TEXT,
+  pending_lease INTEGER
 )`,
   `CREATE TABLE IF NOT EXISTS daily_uptime (
   component_id TEXT NOT NULL,
@@ -133,11 +136,42 @@ const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_monitors_component ON monitors(component_id)`,
   `CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents(created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_check_runs_monitor_time ON check_runs(monitor_id, checked_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_check_runs_time ON check_runs(checked_at)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_ops_sessions_user ON ops_sessions(user_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_ops_sessions_expires ON ops_sessions(expires_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_ops_auth_throttle_reset ON ops_auth_throttle(reset_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_incident_updates_incident ON incident_updates(incident_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_maintenance_component ON maintenance(component_id, end_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_heartbeats_token ON heartbeats(token_hash)`,
 ];
 
-const SCHEMA_VERSION = "6";
+const SCHEMA_VERSION = "9";
+
+// Every file in migrations/, oldest first. ensureSchema and the migrations build
+// the same schema and either may reach a database first. Once ensureSchema has
+// run, it records the files as applied in Wrangler's own table, so a later
+// `wrangler d1 migrations apply` does not stop on a column that already exists.
+// A migration added here must be fully covered by STATEMENTS, ALTERS and the
+// data fixes below.
+export const MIGRATIONS = [
+  "0001_init.sql",
+  "0002_ops_accounts.sql",
+  "0003_daily_latency.sql",
+  "0004_daily_latency_range.sql",
+  "0005_monitor_state.sql",
+  "0006_history_incident_components.sql",
+  "0007_auth_pruning.sql",
+  "0008_monitor_confirmation.sql",
+  "0009_lookup_indexes.sql",
+];
+
+// Same definition Wrangler uses, so its own CREATE TABLE IF NOT EXISTS is a no-op.
+const MIGRATIONS_TABLE = `CREATE TABLE IF NOT EXISTS d1_migrations(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE,
+  applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+)`;
 
 const ALTERS = [
   "ALTER TABLE daily_uptime ADD COLUMN latency_sum INTEGER NOT NULL DEFAULT 0",
@@ -146,9 +180,27 @@ const ALTERS = [
   "ALTER TABLE daily_uptime ADD COLUMN latency_max INTEGER",
   "ALTER TABLE monitors ADD COLUMN confirmed_outcome TEXT",
   "ALTER TABLE incidents ADD COLUMN component_ids_json TEXT",
+  "ALTER TABLE monitors ADD COLUMN consecutive_changes INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE component_state ADD COLUMN pending_json TEXT",
+  "ALTER TABLE component_state ADD COLUMN pending_lease INTEGER",
 ];
 
-export async function ensureSchema(db: D1Database): Promise<void> {
+// One check per isolate. A failed attempt is forgotten so the next request tries again.
+const ready = new WeakMap<D1Database, Promise<void>>();
+
+export function ensureSchema(db: D1Database): Promise<void> {
+  let pending = ready.get(db);
+  if (!pending) {
+    pending = buildSchema(db);
+    ready.set(db, pending);
+    pending.catch(() => {
+      if (ready.get(db) === pending) ready.delete(db);
+    });
+  }
+  return pending;
+}
+
+async function buildSchema(db: D1Database): Promise<void> {
   try {
     const row = await db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").first<{ value: string }>();
     if (row?.value === SCHEMA_VERSION) return;
@@ -159,8 +211,10 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   for (const sql of ALTERS) {
     try {
       await db.prepare(sql).run();
-    } catch {
-      /* column already present on fresh CREATE */
+    } catch (error) {
+      // Only a column that is already there may be skipped. Anything else must
+      // fail the build before the version and the migration history are written.
+      if (!/duplicate column name/i.test(error instanceof Error ? error.message : String(error))) throw error;
     }
   }
   // Versions before 6 accepted secret values into site_settings. They cannot
@@ -173,6 +227,10 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       SELECT MAX(rowid) FROM incidents WHERE auto = 1 AND resolved_at IS NULL GROUP BY component_id
     )`).bind(migrationTime).run();
   await db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_one_open_auto_incident ON incidents(component_id) WHERE auto = 1 AND resolved_at IS NULL").run();
+  await db.batch([
+    db.prepare(MIGRATIONS_TABLE),
+    ...MIGRATIONS.map((name) => db.prepare("INSERT OR IGNORE INTO d1_migrations (name) VALUES (?)").bind(name)),
+  ]);
   await db
     .prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
     .bind(SCHEMA_VERSION)

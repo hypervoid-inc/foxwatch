@@ -1,24 +1,28 @@
-import { drizzle } from "drizzle-orm/d1";
 import type { Env } from "./env.ts";
 import { app } from "./app.ts";
 import { Probe } from "./do/probe.ts";
 import { Monitor } from "./do/monitor.ts";
 import { Scheduler, schedulerStub } from "./do/scheduler.ts";
 import { StatusHub, statusHubStub } from "./do/hub.ts";
-import * as schema from "./db/schema.ts";
-import { deliverAlert, type AlertBody } from "./lib/alerts.ts";
+import type { AlertBody } from "./lib/alerts.ts";
+import { consumeAlerts } from "./lib/alert-queue.ts";
 import { isWorkerPath } from "./lib/routes.ts";
 import { ensureSchema } from "./lib/ensure-schema.ts";
 import { internalErrorResponse } from "./lib/ops-error.ts";
+import { isCacheablePublicGet, isPublicRead, servePublicCached } from "./lib/public-cache.ts";
+import { LIVE_VERSION } from "./lib/public-html.ts";
 
 export { Probe, Monitor, Scheduler, StatusHub };
 
-async function maybeBootstrap(env: Env, ctx: ExecutionContext): Promise<void> {
-  ctx.waitUntil(
-    schedulerStub(env)
-      .tick()
-      .catch((err: unknown) => console.error("bootstrap failed", err)),
-  );
+// A public read is rendered from the KV snapshot, so it is still answered when
+// D1 cannot be reached. Anything that writes or needs the admin API is not.
+async function schemaReady(request: Request, env: Env, pathname: string): Promise<void> {
+  try {
+    await ensureSchema(env.DB);
+  } catch (err) {
+    if (!isPublicRead(request.method, pathname)) throw err;
+    console.error("schema check failed", err);
+  }
 }
 
 export default {
@@ -29,12 +33,16 @@ export default {
         return env.ASSETS.fetch(request);
       }
       if (url.pathname === "/live") {
+        // A page from before the live blocks changed shape. Refused, it falls back to polling /api/status/live.json.
+        if (url.searchParams.get("v") !== LIVE_VERSION) return new Response("Reload the page", { status: 426 });
         return statusHubStub(env).fetch(request);
       }
-      await ensureSchema(env.DB);
-      const cached = await env.STATUS.get("snapshot:public");
-      if (!cached) await maybeBootstrap(env, ctx);
-      return app.fetch(request, env, ctx);
+      const render = async () => {
+        await schemaReady(request, env, url.pathname);
+        return app.fetch(request, env, ctx);
+      };
+      if (isCacheablePublicGet(request.method, url.pathname)) return await servePublicCached(request, ctx, render);
+      return await render();
     } catch (err) {
       console.error("fetch failed", err);
       return internalErrorResponse();
@@ -51,24 +59,6 @@ export default {
   },
 
   async queue(batch: MessageBatch<AlertBody>, env: Env): Promise<void> {
-    const db = drizzle(env.DB, { schema });
-    const channels = await db.select().from(schema.alertChannels);
-    for (const msg of batch.messages) {
-      const eligible = msg.body.channelId ? channels.filter((channel) => channel.id === msg.body.channelId) : channels;
-      const deliveries = await Promise.allSettled(eligible.map(async (ch) => {
-        const events = JSON.parse(ch.eventsJson) as unknown;
-        if (!Array.isArray(events)) throw new Error(`invalid alert channel ${ch.id}`);
-        await deliverAlert(env, {
-          type: ch.type,
-          secretName: ch.secretName,
-          events: events.map(String),
-        }, msg.body);
-      }));
-      if (deliveries.some((delivery) => delivery.status === "rejected")) {
-        msg.retry();
-      } else {
-        msg.ack();
-      }
-    }
+    await consumeAlerts(batch, env);
   },
 } satisfies ExportedHandler<Env, AlertBody>;

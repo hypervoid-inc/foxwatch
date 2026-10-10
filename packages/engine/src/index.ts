@@ -3,17 +3,24 @@ export {
   UrlPolicyError,
   isPrivateHostname,
   parseHomepageUrl,
+  parsePublicUrl,
 } from "./url-policy.ts";
 export { redactText, stripForbiddenHeaders, resolveHeaders, shouldAttachSecrets } from "./secrets.ts";
 export { evaluateHttp, type HttpEvalInput, type HttpEvalResult } from "./http-assert.ts";
-export { heartbeatOutcome } from "./heartbeat.ts";
+export { heartbeatOutcome, heartbeatRecheckMs } from "./heartbeat.ts";
 export {
   componentStatus,
   bannerStatus,
   confirmFlip,
+  advanceMonitor,
+  componentTransition,
+  hasQuorum,
+  CONFIRM_CHANGES,
   statusDotColor,
   STATUS_DOT_COLOR,
   type RegionRun,
+  type MonitorState,
+  type ComponentEffect,
 } from "./status.ts";
 export { sanitizeText, escapeHtml, escapeXml } from "./sanitize.ts";
 export { publicSnapshot, type PublicSnapshot, type PublicComponent, type PublicDay, type PublicIncident } from "./public.ts";

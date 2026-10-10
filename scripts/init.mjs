@@ -3,10 +3,12 @@
  * Creates D1, KV, and Queue on *your* Cloudflare account.
  * IDs go to gitignored wrangler.cloud.jsonc. wrangler.jsonc stays empty.
  */
+import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
+import { pathToFileURL } from "node:url";
 import { stdin as input, stdout as output } from "node:process";
 import { writeCloudIds, cloudWranglerPath, d1DatabaseName, KV_NAMESPACE_TITLE, alertsQueueName } from "./cloud-ids.mjs";
-import { parseJsonBlob, runWrangler } from "./run.mjs";
+import { baselineMigrations, isAlreadyExists, parseJsonBlob, queueNames, runWrangler } from "./run.mjs";
 
 const DB_NAME = d1DatabaseName();
 const KV_TITLE = KV_NAMESPACE_TITLE;
@@ -82,17 +84,7 @@ function listKv() {
 
 function listQueues() {
   try {
-    const raw = runWrangler(["queues", "list"]);
-    if (raw.includes(QUEUE_NAME)) return [QUEUE_NAME];
-    try {
-      const parsed = parseJsonBlob(raw);
-      const names = (Array.isArray(parsed) ? parsed : parsed.queues ?? parsed.result ?? [])
-        .map((q) => q.queue_name ?? q.name ?? q)
-        .filter((n) => typeof n === "string");
-      return names;
-    } catch {
-      return raw.includes(QUEUE_NAME) ? [QUEUE_NAME] : [];
-    }
+    return queueNames(runWrangler(["queues", "list"]));
   } catch {
     return [];
   }
@@ -213,8 +205,7 @@ function ensureQueue() {
   try {
     runWrangler(["queues", "create", QUEUE_NAME]);
   } catch (err) {
-    const text = err.output ?? err.message ?? "";
-    if (text.includes("already taken") || text.includes("already exists")) {
+    if (isAlreadyExists(err.output ?? err.message ?? "")) {
       console.log(`Queue ${QUEUE_NAME} already exists; reusing.`);
       return;
     }
@@ -224,6 +215,7 @@ function ensureQueue() {
 
 function applyMigrations() {
   console.log("Applying D1 migrations…");
+  baselineMigrations(cloudWranglerPath);
   try {
     process.stdout.write(
       runWrangler(["d1", "migrations", "apply", "DB", "--remote", "--config", cloudWranglerPath]),
@@ -247,8 +239,9 @@ async function main() {
 
   const d1Id = await ensureD1();
   const kvId = await ensureKv();
-  ensureQueue();
+  // Before the queue step, so a failure there does not lose the IDs just resolved.
   writeCloudIds({ database_id: d1Id, kv_id: kvId });
+  ensureQueue();
   applyMigrations();
 
   console.log(`
@@ -261,4 +254,5 @@ Next:
 `);
 }
 
-await main();
+// Run only as the entry point, so the helpers above can be imported.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) await main();

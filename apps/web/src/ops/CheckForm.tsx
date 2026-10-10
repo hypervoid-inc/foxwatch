@@ -1,260 +1,46 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "./api.ts";
 import {
+  ASSERTION_OPS,
+  METHODS,
+  buildCheckPayload,
+  buildHttpRequest,
+  clampAssertionThreshold,
+  emptyForm,
+  formFromMonitor,
+  type AssertionOp,
+  type CheckFormState,
+  type CheckKind,
+  type HeaderRow,
+  type Monitor,
+  type PlacedMonitor,
+} from "./check-payload.ts";
+import {
   clampDuration,
   convertDuration,
   durationMs,
   maxAmount,
-  parseDurationToken,
   sanitizeInt,
-  splitDuration,
   unitsForCap,
   UNIT_LABEL,
+  UNIT_MS,
   type DurationUnit,
 } from "./duration.ts";
 import { MAX_INTERVAL_MS, MAX_REGIONS, MAX_TIMEOUT_MS, MIN_INTERVAL_MS, REGIONS } from "@foxwatch/config";
 import { regionLabel, regionTitle } from "./labels.ts";
+import { tokenizeMarkup } from "./markup.ts";
 import { CopyPanel, ErrorText, InfoTip, Mark, Seg, useActionFlash } from "./ui.tsx";
+
+export type { HttpConfig, Monitor, SecretRef } from "./check-payload.ts";
 
 function rejectNonDigitKey(e: KeyboardEvent<HTMLInputElement>) {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key.length === 1 && !/\d/.test(e.key)) e.preventDefault();
 }
 
-const METHODS = ["GET", "HEAD", "POST"] as const;
 const INTERVALS_HB = ["1m", "5m", "10m", "15m"] as const;
 const INTERVAL_UNITS: DurationUnit[] = ["s", "m", "h"];
 const GRACES = ["30s", "1m", "2m", "5m"] as const;
-const DEFAULT_REGIONS = ["wnam", "weur", "apac"];
-const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
-
-const ASSERTION_OPS = [
-  { value: "exists", label: "Exists" },
-  { value: "not_exists", label: "Does not exist" },
-  { value: "equals", label: "Equals" },
-  { value: "not_equals", label: "Not equals" },
-  { value: "gt", label: ">" },
-  { value: "gte", label: ">=" },
-  { value: "lt", label: "<" },
-  { value: "lte", label: "<=" },
-  { value: "contains", label: "Contains" },
-  { value: "not_contains", label: "Does not contain" },
-  { value: "matches", label: "Matches (wildcard)" },
-] as const;
-
-type AssertionOp = (typeof ASSERTION_OPS)[number]["value"];
-type AssertionRow = { path: string; op: AssertionOp; value: string };
-
-export type SecretRef = { __foxwatch_secret__: string };
-
-export type HttpConfig = {
-  type?: string;
-  url?: string;
-  method?: string;
-  headers?: Record<string, string | SecretRef>;
-  body?: string;
-  expect?: {
-    status?: number | number[];
-    bodyIncludes?: string;
-    jsonPath?: { path: string; equals?: string | number | boolean; exists?: boolean };
-    assertions?: Array<{ path: string; op: string; value?: string | number | boolean | null }>;
-    assertionFailThreshold?: number;
-  };
-  intervalMs?: number;
-  timeoutMs?: number;
-  graceMs?: number;
-  retries?: number;
-  followRedirects?: boolean;
-  failWhen?: "majority" | "any" | "all";
-  confirmFails?: number;
-  degradedIf?: { latencyMs?: number };
-  regions?: string[];
-  allowedHosts?: string[];
-};
-
-export type Monitor = {
-  id: string;
-  origin: string;
-  drifted: boolean;
-  type: string;
-  name: string;
-  groupId?: string;
-  groupName: string;
-  componentId?: string;
-  componentName: string;
-  critical: boolean;
-  mutedUntil: number | null;
-  confirmedOutcome?: "pass" | "degraded" | "fail" | null;
-  consecutiveFails?: number;
-  config: HttpConfig & Record<string, unknown>;
-};
-
-type HeaderRow = { key: string; kind: "text" | "secret"; value: string };
-type CheckKind = "http" | "heartbeat";
-
-function intervalFromMs(ms?: number): string {
-  if (ms === 30_000) return "30s";
-  if (ms === 300_000) return "5m";
-  if (ms === 600_000) return "10m";
-  if (ms === 900_000) return "15m";
-  if (ms && ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
-  if (ms && ms % 60_000 === 0) return `${ms / 60_000}m`;
-  if (ms && ms % 1000 === 0) return `${ms / 1000}s`;
-  return "1m";
-}
-
-function timeoutFromMs(ms?: number): { value: string; unit: DurationUnit } {
-  return splitDuration(ms && ms > 0 ? ms : 10_000);
-}
-
-function graceFromMs(ms?: number): string {
-  if (ms === 30_000) return "30s";
-  if (ms === 60_000) return "1m";
-  if (ms === 300_000) return "5m";
-  if (ms && ms % 60_000 === 0) return `${ms / 60_000}m`;
-  if (ms && ms % 1000 === 0) return `${ms / 1000}s`;
-  return "2m";
-}
-
-function headersToRows(headers: HttpConfig["headers"]): HeaderRow[] {
-  const rows = Object.entries(headers ?? {}).map(([key, value]) => {
-    if (value && typeof value === "object" && "__foxwatch_secret__" in value) {
-      return { key, kind: "secret" as const, value: value.__foxwatch_secret__ };
-    }
-    return { key, kind: "text" as const, value: String(value ?? "") };
-  });
-  return rows.length ? rows : [{ key: "", kind: "text", value: "" }];
-}
-
-function rowsToHeaders(rows: HeaderRow[]): Record<string, string | SecretRef> {
-  const out: Record<string, string | SecretRef> = {};
-  for (const row of rows) {
-    const key = row.key.trim();
-    if (!key || !row.value.trim()) continue;
-    out[key] = row.kind === "secret" ? { __foxwatch_secret__: row.value.trim() } : row.value;
-  }
-  return out;
-}
-
-function slugify(name: string): string {
-  const s = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 62);
-  return s || `check-${Date.now().toString(36)}`;
-}
-
-type CheckFormState = {
-  checkType: CheckKind;
-  name: string;
-  url: string;
-  method: (typeof METHODS)[number];
-  headers: HeaderRow[];
-  body: string;
-  expectStatus: string;
-  bodyIncludes: string;
-  assertions: AssertionRow[];
-  assertionFailThreshold: number;
-  interval: string;
-  timeout: string;
-  timeoutUnit: DurationUnit;
-  grace: string;
-  regions: string[];
-  groupName: string;
-  componentName: string;
-  critical: boolean;
-  retries: string;
-  followRedirects: boolean;
-  failWhen: "majority" | "any" | "all";
-  confirmFails: string;
-  latencyThreshold: string;
-  latencyUnit: DurationUnit;
-  allowedHosts: string;
-};
-
-function emptyForm(): CheckFormState {
-  return {
-    checkType: "http",
-    name: "",
-    url: "https://",
-    method: "GET",
-    headers: [{ key: "", kind: "text", value: "" }],
-    body: "",
-    expectStatus: "200",
-    bodyIncludes: "",
-    assertions: [],
-    assertionFailThreshold: 1,
-    interval: "1m",
-    timeout: "10",
-    timeoutUnit: "s",
-    grace: "2m",
-    regions: [...DEFAULT_REGIONS],
-    groupName: "API",
-    componentName: "",
-    critical: false,
-    retries: "2",
-    followRedirects: true,
-    failWhen: "majority",
-    confirmFails: "3",
-    latencyThreshold: "",
-    latencyUnit: "ms",
-    allowedHosts: "",
-  };
-}
-
-function formFromMonitor(m: Monitor): CheckFormState {
-  const cfg = m.config;
-  const expect = cfg.expect ?? {};
-  const status = Array.isArray(expect.status) ? expect.status.join(", ") : expect.status;
-  // Load assertions, converting legacy jsonPath if present
-  let assertions: AssertionRow[] = [];
-  if (expect.assertions?.length) {
-    assertions = expect.assertions.map((a) => ({
-      path: a.path,
-      op: a.op as AssertionOp,
-      value: a.value == null ? "" : String(a.value),
-    }));
-  } else if (expect.jsonPath) {
-    const jp = expect.jsonPath;
-    if (jp.exists) {
-      assertions = [{ path: jp.path, op: "exists", value: "" }];
-    } else if (jp.equals !== undefined) {
-      assertions = [{ path: jp.path, op: "equals", value: String(jp.equals) }];
-    }
-  }
-  const timeout = timeoutFromMs(cfg.timeoutMs);
-  const timeoutMs = durationMs(timeout.value, timeout.unit) ?? 10_000;
-  const degradeRaw = cfg.degradedIf?.latencyMs ? splitDuration(cfg.degradedIf.latencyMs) : { value: "", unit: "ms" as const };
-  const degrade = clampDuration(degradeRaw.value, degradeRaw.unit, Math.max(1, timeoutMs - 1));
-  return {
-    checkType: m.type === "heartbeat" ? "heartbeat" : "http",
-    name: m.name,
-    url: String(cfg.url ?? "https://"),
-    method: (METHODS.includes(cfg.method as (typeof METHODS)[number]) ? cfg.method : "GET") as (typeof METHODS)[number],
-    headers: headersToRows(cfg.headers),
-    body: String(cfg.body ?? ""),
-    expectStatus: String(status ?? 200),
-    bodyIncludes: String(expect.bodyIncludes ?? ""),
-    assertions,
-    assertionFailThreshold: expect.assertionFailThreshold ?? 1,
-    interval: intervalFromMs(cfg.intervalMs),
-    timeout: timeout.value,
-    timeoutUnit: timeout.unit,
-    grace: graceFromMs(cfg.graceMs),
-    regions: (cfg.regions?.length ? cfg.regions : [...DEFAULT_REGIONS]).slice(),
-    groupName: m.groupName,
-    componentName: m.componentName,
-    critical: m.critical,
-    retries: String(Number.isInteger(Number(cfg.retries)) ? Number(cfg.retries) : 2),
-    followRedirects: cfg.followRedirects !== false,
-    failWhen: cfg.failWhen ?? "majority",
-    confirmFails: String(Number.isInteger(Number(cfg.confirmFails)) && Number(cfg.confirmFails) >= 1 ? Number(cfg.confirmFails) : 3),
-    latencyThreshold: degrade.value,
-    latencyUnit: degrade.unit,
-    allowedHosts: (cfg.allowedHosts ?? []).join(", "),
-  };
-}
 
 type TestResult = {
   outcome: string;
@@ -297,9 +83,13 @@ function IntInput({
       value={value}
       onKeyDown={rejectNonDigitKey}
       onChange={(e) => {
-        const next = sanitizeInt(e.target.value, max, min);
+        // Only the ceiling applies while typing: holding "4" up to a floor of 30 would turn 45 into 305.
+        const next = sanitizeInt(e.target.value, max);
         if (next === undefined) return;
         onChange(next);
+      }}
+      onBlur={() => {
+        if (value !== "" && Number(value) < min) onChange(String(min));
       }}
     />
   );
@@ -313,7 +103,7 @@ function DurationInput({
   required,
   placeholder,
   units: unitList,
-  min = 1,
+  minMs = 1,
   onChange,
 }: {
   id: string;
@@ -323,10 +113,13 @@ function DurationInput({
   required?: boolean;
   placeholder?: string;
   units?: DurationUnit[];
-  min?: number;
+  minMs?: number;
   onChange: (value: string, unit: DurationUnit) => void;
 }) {
-  const units = (unitList ?? unitsForCap(capMs)).filter((u) => maxAmount(u, capMs) >= min);
+  // The floor is a duration, so each unit has its own smallest amount (30 sec, but 1 min).
+  const minFor = (u: DurationUnit) => Math.max(1, Math.ceil(minMs / UNIT_MS[u]));
+  const units = (unitList ?? unitsForCap(capMs)).filter((u) => maxAmount(u, capMs) >= minFor(u));
+  const min = minFor(unit);
   const max = Math.max(min, maxAmount(unit, capMs));
   return (
     <span className="check-duration">
@@ -337,7 +130,7 @@ function DurationInput({
         value={units.includes(unit) ? unit : (units[0] ?? "ms")}
         onChange={(e) => {
           const next = e.target.value as DurationUnit;
-          onChange(convertDuration(value, unit, next, capMs, min), next);
+          onChange(convertDuration(value, unit, next, capMs, minFor(next)), next);
         }}
       >
         {units.map((id) => (
@@ -352,13 +145,20 @@ function DurationInput({
 
 export function CheckForm({
   monitor,
+  monitors,
   secrets,
-  onDone,
+  onSaved,
+  onClose,
   onCancel,
 }: {
   monitor: Monitor | null;
+  /** Every check, so a typed group or component name can join the one that already has it. */
+  monitors: PlacedMonitor[];
   secrets: string[];
-  onDone: () => Promise<void>;
+  /** A save landed: refresh the list now. */
+  onSaved: () => Promise<void>;
+  /** Close the panel for the check that was saved (its id, or "new"), if it is still the one open. */
+  onClose: (saved: string) => void;
   onCancel: () => void;
 }) {
   const editing = monitor;
@@ -394,7 +194,7 @@ export function CheckForm({
 
   function setKind(checkType: CheckKind) {
     if (editing) return;
-    setForm((f) => ({ ...f, checkType, interval: checkType === "heartbeat" ? "10m" : "1m" }));
+    setForm((f) => ({ ...f, checkType, interval: "10m", intervalValue: "1", intervalUnit: "m" }));
   }
 
   function toggleRegion(id: string) {
@@ -407,29 +207,26 @@ export function CheckForm({
     });
   }
 
+  function removeAssertion(index: number) {
+    setForm((f) => {
+      const assertions = f.assertions.filter((_, j) => j !== index);
+      return { ...f, assertions, assertionFailThreshold: clampAssertionThreshold(f.assertionFailThreshold, assertions.length) };
+    });
+  }
+
   async function sendTestRequest() {
     setTestResult(null);
     setError(null);
-    let url: URL;
-    try {
-      url = new URL(form.url);
-    } catch {
-      setError("Enter a valid URL to test.");
+    // The same request and expectations a save would store.
+    const request = buildHttpRequest(form);
+    if (!request.ok) {
+      setError(request.error);
       return;
     }
     setTestPending(true);
-    const headers = rowsToHeaders(form.headers);
-    const body = form.method === "POST" && form.body.trim() ? form.body.trim() : undefined;
     const res = await api<TestResult>("/api/ops/monitors/test-request", {
       method: "POST",
-      body: JSON.stringify({
-        url: url.toString(),
-        method: form.method,
-        headers,
-        body,
-        timeout: durationMs(form.timeout, form.timeoutUnit) ?? 10_000,
-        expect: { status: Number(form.expectStatus.split(",")[0]) || 200 },
-      }),
+      body: JSON.stringify(request.payload),
     });
     setTestPending(false);
     if (!res.ok) {
@@ -441,160 +238,36 @@ export function CheckForm({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (pending || flash) return;
     setError(null);
-    const name = form.name.trim();
-    if (!name) {
-      setError("Name is required.");
+    const built = buildCheckPayload(form, editing, monitors);
+    if (!built.ok) {
+      setError(built.error);
       return;
     }
-    const id = editing?.id ?? slugify(name);
-    const componentName = form.componentName.trim() || name;
-    const shared = {
-      id,
-      name,
-      groupId: editing?.groupId ?? slugify(form.groupName.trim() || "api"),
-      groupName: form.groupName.trim() || "API",
-      componentId: editing?.componentId ?? slugify(componentName),
-      componentName,
-      critical: form.critical,
-    };
-
-    const confirmFails = Number(form.confirmFails);
-    if (!Number.isInteger(confirmFails) || confirmFails < 1 || confirmFails > 10) {
-      setError("Confirm after must be from 1 to 10 failures.");
-      return;
-    }
-
-    let payload: Record<string, unknown>;
-    if (form.checkType === "heartbeat") {
-      payload = { ...shared, type: "heartbeat", interval: form.interval, grace: form.grace, confirmFails };
-    } else {
-      let url: URL;
-      try {
-        url = new URL(form.url);
-      } catch {
-        setError("Enter a valid URL, including https://");
-        return;
-      }
-      if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname))) {
-        setError("Use HTTPS. Plain HTTP is only available for local development targets.");
-        return;
-      }
-      const headers = rowsToHeaders(form.headers);
-      for (const row of form.headers) {
-        if (row.kind === "secret" && row.value.trim() && !SECRET_NAME_RE.test(row.value.trim())) {
-          setError("Secret names must look like API_TOKEN (A-Z, 0-9, _).");
-          return;
-        }
-      }
-      let body = form.body.trim();
-      if (form.method === "POST" && body) {
-        try {
-          body = JSON.stringify(JSON.parse(body));
-        } catch {
-          setError("Request JSON is not valid.");
-          return;
-        }
-        if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
-          headers["Content-Type"] = "application/json";
-        }
-      }
-      const expectedStatuses = form.expectStatus.split(",").map((value) => Number(value.trim())).filter((value) => Number.isFinite(value));
-      if (!expectedStatuses.length || expectedStatuses.length > 20 || expectedStatuses.some((status) => !Number.isInteger(status) || status < 100 || status > 599)) {
-        setError("Expected statuses must be comma-separated HTTP status codes.");
-        return;
-      }
-      const timeoutMs = durationMs(form.timeout, form.timeoutUnit);
-      if (timeoutMs == null || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
-        setError("Timeout must be from 1ms to 60 seconds.");
-        return;
-      }
-      const intervalMs = parseDurationToken(form.interval);
-      if (intervalMs == null || intervalMs < MIN_INTERVAL_MS || intervalMs > MAX_INTERVAL_MS) {
-        setError("Interval must be from 30 seconds to 24 hours.");
-        return;
-      }
-      const retries = Number(form.retries);
-      if (!Number.isInteger(retries) || retries < 0 || retries > 5) {
-        setError("Retries must be from 0 to 5.");
-        return;
-      }
-      const latencyThreshold = form.latencyThreshold ? durationMs(form.latencyThreshold, form.latencyUnit) : null;
-      if (form.latencyThreshold !== "" && (latencyThreshold == null || latencyThreshold < 1 || latencyThreshold >= timeoutMs)) {
-        setError("Degrade-above must be at least 1ms and below the timeout. At or past timeout is a failure.");
-        return;
-      }
-      const allowedHosts = [...new Set(form.allowedHosts.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))];
-      if (!allowedHosts.includes(url.hostname.toLowerCase())) allowedHosts.unshift(url.hostname.toLowerCase());
-      // Build assertions payload
-      const validAssertions = form.assertions
-        .filter((a) => a.path.trim())
-        .map((a) => {
-          const base: { path: string; op: string; value?: string | number | boolean | null } = { path: a.path.trim(), op: a.op };
-          if (a.op === "exists" || a.op === "not_exists") return base;
-          // Try to parse as number or boolean
-          const v = a.value.trim();
-          if (v === "true") base.value = true;
-          else if (v === "false") base.value = false;
-          else if (v === "null") base.value = null;
-          else if (v !== "" && Number.isFinite(Number(v))) base.value = Number(v);
-          else base.value = v;
-          return base;
-        });
-      if (validAssertions.length > 20) {
-        setError("Maximum 20 assertions per check.");
-        return;
-      }
-      payload = {
-        ...(editing?.config ?? {}),
-        ...shared,
-        type: "http",
-        url: url.toString(),
-        method: form.method,
-        body: form.method === "POST" && body ? body : undefined,
-        headers,
-        allowedHosts,
-        regions: form.regions.length ? form.regions : ["wnam"],
-        interval: form.interval,
-        timeout: timeoutMs,
-        retries,
-        followRedirects: form.followRedirects,
-        failWhen: form.failWhen,
-        confirmFails,
-        degradedIf: latencyThreshold ? { latencyMs: latencyThreshold } : undefined,
-        expect: {
-          status: expectedStatuses.length === 1 ? expectedStatuses[0] : expectedStatuses,
-          bodyIncludes: form.bodyIncludes.trim() || undefined,
-          assertions: validAssertions.length ? validAssertions : undefined,
-          assertionFailThreshold: validAssertions.length > 1 ? form.assertionFailThreshold : undefined,
-        },
-      };
-    }
+    const saved = editing?.id ?? "new";
 
     setPending(true);
     const res = editing
-      ? await api<{ ok: boolean }>(`/api/ops/monitors/${editing.id}`, { method: "PATCH", body: JSON.stringify(payload) })
-      : await api<{ ok: boolean }>("/api/ops/monitors", { method: "POST", body: JSON.stringify(payload) });
+      ? await api<{ ok: boolean }>(`/api/ops/monitors/${editing.id}`, { method: "PATCH", body: JSON.stringify(built.payload) })
+      : await api<{ ok: boolean }>("/api/ops/monitors", { method: "POST", body: JSON.stringify(built.payload) });
     if (!res.ok) {
       setPending(false);
       setError(res.error);
       return;
     }
     setPending(false);
+    // The list shows the saved check at once. The flash below is only cosmetic.
+    void onSaved();
     if (!editing && form.checkType === "heartbeat") {
-      const rot = await api<{ token: string; curl: string }>(`/api/ops/heartbeats/${id}/rotate`, { method: "POST", body: "{}" });
+      const rot = await api<{ token: string; curl: string }>(`/api/ops/heartbeats/${built.id}/rotate`, { method: "POST", body: "{}" });
       if (rot.ok) {
         setCurl(rot.data.curl);
         return;
       }
     }
-    flashOkThen(() => {
-      void onDone();
-    });
+    flashOkThen(() => onClose(saved));
   }
-
-  const intervalParts = splitDuration(parseDurationToken(form.interval) ?? 60_000);
-  const intervalUnit = INTERVAL_UNITS.includes(intervalParts.unit) ? intervalParts.unit : "m";
 
   return (
     <form className="card check-form" onSubmit={submit}>
@@ -677,13 +350,13 @@ export function CheckForm({
               </span>
               <DurationInput
                 id="check-interval"
-                value={intervalParts.value}
-                unit={intervalUnit}
+                value={form.intervalValue}
+                unit={form.intervalUnit}
                 capMs={MAX_INTERVAL_MS}
                 units={INTERVAL_UNITS}
-                min={intervalUnit === "s" ? 30 : 1}
+                minMs={MIN_INTERVAL_MS}
                 required
-                onChange={(value, unit) => set("interval", `${value}${unit}`)}
+                onChange={(intervalValue, intervalUnit) => setForm((f) => ({ ...f, intervalValue, intervalUnit }))}
               />
             </label>
           </div>
@@ -876,7 +549,7 @@ export function CheckForm({
                   <div className="check-assertions">
                     <span className="check-row-k">
                       Assertions
-                      <InfoTip>JSON path assertions on the response body. Use $.key.nested[0] syntax. Wildcard matching uses * and ? characters.</InfoTip>
+                      <InfoTip>JSON path assertions on the response body. Use $.key.nested[0] syntax, or $['any key'] for keys with other characters. Wildcard matching uses * and ? characters. Equals compares numbers, true, false and null by type. Wrap a value in double quotes to compare it as text, like "200".</InfoTip>
                     </span>
                     {form.assertions.map((row, i) => (
                       <div key={i} className="check-assertion-row">
@@ -909,7 +582,7 @@ export function CheckForm({
                         <button
                           type="button"
                           className="check-assertion-rm"
-                          onClick={() => set("assertions", form.assertions.filter((_, j) => j !== i))}
+                          onClick={() => removeAssertion(i)}
                           aria-label="Remove assertion"
                         >
                           &times;
@@ -932,7 +605,7 @@ export function CheckForm({
                           min={1}
                           max={form.assertions.length}
                           value={form.assertionFailThreshold}
-                          onChange={(e) => set("assertionFailThreshold", Math.max(1, Math.min(form.assertions.length, Number(e.target.value) || 1)))}
+                          onChange={(e) => set("assertionFailThreshold", clampAssertionThreshold(Number(e.target.value) || 1, form.assertions.length))}
                         />
                       </label>
                     ) : null}
@@ -1031,9 +704,9 @@ export function CheckForm({
         </div>
       </details>
       {error ? <ErrorText>{error}</ErrorText> : null}
-      {curl ? <CopyPanel curl={curl} onDismiss={() => void onDone()} /> : null}
+      {curl ? <CopyPanel curl={curl} onDismiss={() => onClose("new")} /> : null}
       <div className="check-form-actions">
-        <button className="btn btn-primary btn-flash" disabled={pending || Boolean(curl)} type="submit">
+        <button className="btn btn-primary btn-flash" disabled={pending || flash || Boolean(curl)} type="submit">
           {pending ? "Saving…" : flash ? "Saved" : editing ? "Save check" : "Create check"}
         </button>
         <button className="btn btn-secondary" type="button" onClick={onCancel}>
@@ -1060,17 +733,14 @@ function TestResponseBody({ text }: { text: string }) {
   }
 
   if (type === "xml" || type === "html") {
-    return <pre className="test-result-body markup-highlight" dangerouslySetInnerHTML={{ __html: highlightMarkup(formatted) }} />;
+    return (
+      <pre className="test-result-body markup-highlight">
+        {tokenizeMarkup(formatted).map((token, i) => (token.kind === "text" ? token.text : <span key={i} className={`markup-${token.kind}`}>{token.text}</span>))}
+      </pre>
+    );
   }
 
   return <pre className="test-result-body">{formatted}</pre>;
-}
-
-function highlightMarkup(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/&lt;(\/?)([a-zA-Z0-9-]+)/g, '&lt;$1<span class="markup-tag">$2</span>')
-    .replace(/\s([a-zA-Z-]+)=/g, ' <span class="markup-attr">$1</span>=')
-    .replace(/="([^"]*)"/g, '="<span class="markup-val">$1</span>"');
 }
 
 function formatResponseText(text: string): { type: "json" | "xml" | "html" | "text"; formatted: string } {

@@ -1,8 +1,5 @@
 import type { Assertion, AssertionOp, HttpExpect, RunOutcome } from "@foxwatch/config";
-
-const MAX_PATTERN = 80;
-const MAX_JSONPATH = 64;
-const MAX_GLOB = 128;
+import { MAX_ASSERTION_VALUE_LENGTH, MAX_BODY_INCLUDES_LENGTH, parseJsonPath } from "@foxwatch/config";
 
 function statusOk(got: number, expected?: number | number[]): boolean {
   if (expected == null) return got >= 200 && got < 400;
@@ -11,31 +8,18 @@ function statusOk(got: number, expected?: number | number[]): boolean {
 }
 
 function walkJsonPath(data: unknown, path: string): unknown {
-  if (!path.startsWith("$") || path.length > MAX_JSONPATH) {
-    throw new Error("jsonpath_invalid");
-  }
-  if (/[*{}()]|\.\./.test(path)) throw new Error("jsonpath_invalid");
-  const parts = path
-    .slice(1)
-    .split(".")
-    .flatMap((p) => {
-      const m = /^([A-Za-z0-9_]+)?(?:\[(\d+)\])?$/.exec(p);
-      if (!m || (p && !m[0])) return [];
-      const out: Array<string | number> = [];
-      if (m[1]) out.push(m[1]);
-      if (m[2]) out.push(Number(m[2]));
-      return out;
-    });
   let cur: unknown = data;
-  for (const part of parts) {
+  for (const part of parseJsonPath(path)) {
     if (cur == null || typeof cur !== "object") return undefined;
+    // Own keys only: `$.constructor` is not a field of the response.
+    if (!Object.hasOwn(cur, part)) return undefined;
     cur = (cur as Record<string, unknown>)[part as string];
   }
   return cur;
 }
 
 function safeIncludes(haystack: string, needle: string): boolean {
-  if (needle.length > MAX_PATTERN) return false;
+  if (needle.length > MAX_BODY_INCLUDES_LENGTH) return false;
   return haystack.includes(needle);
 }
 
@@ -70,7 +54,7 @@ function applyOp(op: AssertionOp, actual: unknown, expected: Assertion["value"])
       return typeof actual === "string" && typeof expected === "string" && !actual.includes(expected);
     case "matches": {
       if (typeof actual !== "string" || typeof expected !== "string") return false;
-      if (expected.length > MAX_GLOB) return false;
+      if (expected.length > MAX_ASSERTION_VALUE_LENGTH) return false;
       try {
         return globToRegex(expected).test(actual);
       } catch {

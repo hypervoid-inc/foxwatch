@@ -4,9 +4,11 @@
 # Allow http:// (not just https://) checks while running pnpm dev
 # ALLOW_HTTP_LOCAL=true
 
-# Workers Analytics Engine SQL API (ops latency charts only)
-# ACCOUNT_ID=
-# WAE_API_TOKEN=
+# Let superadmins set and rotate secret values from Settings (README: Worker secrets).
+# On a deployed Worker these are secrets, set with `wrangler secret put`.
+# FOXWATCH_CF_API_TOKEN=
+# FOXWATCH_CF_ACCOUNT_ID=
+# FOXWATCH_CF_SCRIPT_NAME=foxwatch
 
 # HTTP header secret values for local checks (names are registered in ops)
 # YOUR_API_TOKEN=

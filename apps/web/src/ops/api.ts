@@ -22,25 +22,48 @@ async function readError(res: Response): Promise<{ error: string; code?: string 
   return fromErrorBody(res, body);
 }
 
+/** A request that never got an answer: offline, DNS, a dropped connection. */
+const UNREACHABLE = { ok: false, status: 0, error: "Could not reach the server. Check your connection and try again.", code: "network" } as const;
+
+/** A success status whose body is not the JSON the API sends, such as a proxy or login page. */
+async function readData<T>(res: Response): Promise<ApiResult<T>> {
+  if (res.status === 204) return { ok: true, data: undefined as T };
+  try {
+    return { ok: true, data: (await res.json()) as T };
+  } catch {
+    return { ok: false, status: res.status, error: "The server sent an unexpected response. Try again.", code: "bad_response" };
+  }
+}
+
+/** Always resolves, so a caller's pending state is cleared whatever happens to the request. */
 export async function api<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      credentials: "same-origin",
+      ...init,
+      headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    });
+  } catch {
+    return UNREACHABLE;
+  }
   if (!res.ok) {
     const err = await readError(res);
     return { ok: false, status: res.status, ...err };
   }
-  if (res.status === 204) return { ok: true, data: undefined as T };
-  return { ok: true, data: (await res.json()) as T };
+  return readData<T>(res);
 }
 
 export async function apiUpload<T>(path: string, body: FormData): Promise<ApiResult<T>> {
-  const res = await fetch(path, { method: "POST", credentials: "same-origin", body });
+  let res: Response;
+  try {
+    res = await fetch(path, { method: "POST", credentials: "same-origin", body });
+  } catch {
+    return UNREACHABLE;
+  }
   if (!res.ok) {
     const err = await readError(res);
     return { ok: false, status: res.status, ...err };
   }
-  return { ok: true, data: (await res.json()) as T };
+  return readData<T>(res);
 }

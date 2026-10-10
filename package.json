@@ -15,7 +15,7 @@
     "deploy": "node scripts/deploy.mjs",
     "types": "wrangler types",
     "test": "vitest run",
-    "check-types": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.worker.json",
+    "check-types": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.worker.json && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.test.dom.json && tsc --noEmit -p tsconfig.node.json",
     "preinstall": "node -e \"const a=process.env.npm_config_user_agent||''; if(!a.includes('pnpm')){console.error('Foxwatch uses pnpm workspaces. Install pnpm: https://pnpm.io/installation'); process.exit(1)}\"",
     "foxwatch": "node scripts/cli.mjs",
     "webhook": "node scripts/webhook.mjs"
@@ -47,6 +47,7 @@
     "@cloudflare/vite-plugin": "^1.13.0",
     "@cloudflare/workers-types": "5.20260816.1",
     "@tailwindcss/vite": "^4.1.13",
+    "@types/node": "^22.20.4",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
     "@vgpu/wgsl": "^0.3.0",

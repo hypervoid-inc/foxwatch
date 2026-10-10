@@ -41,7 +41,9 @@
   ],
   "queues": {
     "producers": [{ "binding": "ALERTS", "queue": "foxwatch-alerts" }],
-    "consumers": [{ "queue": "foxwatch-alerts", "max_batch_size": 10, "max_batch_timeout": 5 }]
+    // The consumer acks permanent failures and backs off the rest itself, per
+    // channel. max_retries is ALERT_MAX_ATTEMPTS - 1 in lib/alert-queue.ts.
+    "consumers": [{ "queue": "foxwatch-alerts", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5 }]
   },
   "durable_objects": {
     "bindings": [

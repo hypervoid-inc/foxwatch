@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { MAX_REGIONS } from "@foxwatch/config";
 
 /** Machine code plus a sentence the admin UI can render as-is. */
 export type OpsErrorBody = { error: string; code: string };
@@ -11,6 +12,7 @@ const MESSAGES: Record<string, string> = {
   component: "One of those components no longer exists.",
   confirm_fails: "Confirmation runs must be from 1 to 10.",
   credentials: "Email or password is incorrect.",
+  current_password: "Current password is incorrect.",
   decode: "That file could not be read as an image.",
   delivery: "The alert queue is not available in this environment.",
   delivery_failed: "The alert could not be delivered. Check the webhook URL secret and try again.",
@@ -18,9 +20,13 @@ const MESSAGES: Record<string, string> = {
   exists: "That already exists.",
   expect: "Check the response assertions and expected status codes.",
   forbidden: "You do not have permission to do that.",
+  header_blocked: "Host, Connection, Proxy-Authorization, Set-Cookie, CF-* and X-Forwarded-* headers are set by the network and cannot be sent. Remove them.",
   headers: "Check the header names and keep values under 8 KB.",
   https_required: "Use HTTPS. Plain HTTP is only enabled for localhost in local development.",
   icon: "Could not save that icon.",
+  incident_open: "This component already has an open automatic incident. Resolve that one first.",
+  incident_resolved: "That incident is resolved. Reopen it to change its status.",
+  incident_status: "Status must be investigating, identified, monitoring or resolved.",
   incident_time: "Incident start must be within the past year and not in the future.",
   internal: "Something went wrong. Try again.",
   interval: "Interval must be from 30 seconds to 24 hours.",
@@ -31,7 +37,7 @@ const MESSAGES: Record<string, string> = {
   invalid_password: "Password must be 12–128 characters.",
   invalid_role: "Role must be admin or superadmin.",
   invalid_url: "Use an http(s) address, without a username.",
-  jsonpath_invalid: "JSON path is not valid.",
+  jsonpath_invalid: "JSON path is not valid. Use $.key, $.list[0] or $['any key'].",
   last_superadmin: "You cannot remove the last superadmin.",
   latency: "Degrade-above must be at least 1ms and below the timeout. At or past timeout is a failure.",
   management_unavailable:
@@ -42,14 +48,20 @@ const MESSAGES: Record<string, string> = {
   private_address: "Private network targets are blocked to protect the Worker.",
   quota: "Monitor quota reached.",
   rate: "Too many attempts. Try again in a few minutes.",
-  regions: "Choose from 1 to 8 supported regions.",
+  regions: `Choose from 1 to ${MAX_REGIONS} supported regions.`,
   retries: "Retries must be from 0 to 5.",
   rotate_only: "That secret is set on the Worker. Rotate it by sending a new value.",
   secret: "Use a name like API_TOKEN and a value up to 8 KB.",
+  secret_name: "Secret names must look like API_TOKEN (A-Z, 0-9, _).",
+  secret_request:
+    "Only a superadmin can change the URL, method, body, headers or allowed hosts of a request that carries a secret.",
   secret_required: "Sensitive headers must reference a Worker secret instead of storing a literal value.",
+  secret_reserved: "That name is reserved for Foxwatch's own configuration and cannot be used as a secret.",
+  secret_unknown: "That secret is not registered. Ask a superadmin to add it under Settings.",
   secret_value: "A non-empty value is required (max 8 KB).",
   self: "You cannot remove your own account.",
   setup: "Create the first account to continue.",
+  setup_token: "Setup token is missing or incorrect. It is the FOXWATCH_SETUP_TOKEN secret on this Worker.",
   start_at: "Pick a start time within the next 90 days.",
   title: "Add a public incident title.",
   timeout: "Timeout must be from 1ms to 60 seconds.",

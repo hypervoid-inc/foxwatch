@@ -21,6 +21,10 @@ export class Probe extends DurableObject<Env> {
       colo,
     });
   }
+
+  async destroy(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
 }
 
 export function probeStub(env: Env, region: Region, monitorId: string) {

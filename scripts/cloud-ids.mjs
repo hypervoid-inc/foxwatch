@@ -69,16 +69,21 @@ export function writeCloudIds({ database_id, kv_id }) {
 }
 
 /** Gitignored Wrangler config with real IDs. Used via `wrangler --config wrangler.cloud.jsonc`. */
-export function writeCloudWrangler({ database_id, kv_id }) {
-  let text = readWranglerText();
-  text = upsertJsoncField(text, "database_id", database_id, /("database_name"\s*:\s*"[^"]*")/);
-  if (/"kv_namespaces"[\s\S]*?"id"\s*:\s*"[^"]*"/.test(text)) {
-    text = text.replace(/("kv_namespaces"[\s\S]*?"id"\s*:\s*")[^"]*"/, `$1${kv_id}"`);
-  } else {
-    text = text.replace(/("kv_namespaces"\s*:\s*\[\s*\{\s*"binding"\s*:\s*"STATUS")/, `$1,\n      "id": "${kv_id}"`);
-  }
-  writeFileSync(cloudWranglerPath, text);
+export function writeCloudWrangler(ids) {
+  writeFileSync(cloudWranglerPath, cloudWranglerText(readWranglerText(), ids));
 }
+
+/** wrangler.jsonc text with the D1 and KV IDs set, comments and layout kept. */
+export function cloudWranglerText(text, { database_id, kv_id }) {
+  text = upsertJsoncField(text, "database_id", database_id, /("database_name"\s*:\s*"[^"]*")/);
+  return text.replace(STATUS_KV_RE, (entry) => upsertJsoncField(entry, "id", kv_id, /("binding"\s*:\s*"STATUS")/));
+}
+
+/**
+ * The STATUS entry of kv_namespaces, and nothing past its closing brace, so
+ * another namespace or a later "id" key is never read or rewritten as ours.
+ */
+const STATUS_KV_RE = /\{[^{}]*"binding"\s*:\s*"STATUS"[^{}]*\}/;
 
 function upsertJsoncField(text, key, value, after) {
   const re = new RegExp(`("${key}"\\s*:\\s*")[^"]*"`);
@@ -101,9 +106,9 @@ function readWranglerText() {
   return readFileSync(wranglerPath, "utf8");
 }
 
-function idsFromWranglerText(text) {
+export function idsFromWranglerText(text) {
   const database_id = /"database_id"\s*:\s*"([^"]*)"/.exec(text)?.[1];
-  const kv_id = /"kv_namespaces"[\s\S]*?"id"\s*:\s*"([^"]*)"/.exec(text)?.[1];
+  const kv_id = /"id"\s*:\s*"([^"]*)"/.exec(STATUS_KV_RE.exec(text)?.[0] ?? "")?.[1];
   if (!isRealId(database_id) || !isRealId(kv_id)) return null;
   return { database_id, kv_id };
 }

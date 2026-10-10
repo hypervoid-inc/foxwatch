@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { uniqueChannelId } from "./alert-channel.ts";
 import { api, apiUpload } from "./api.ts";
 import { mutationError } from "./labels.ts";
 import { prepareSiteIcon } from "./prepare-icon.ts";
+import { secretActions } from "./secret-actions.ts";
 import { ConfirmDialog, ErrorText, FoxMark, InfoTip, Seg, useActionFlash } from "./ui.tsx";
 
 export type Me = { id: string; email: string; role: "superadmin" | "admin" };
@@ -23,8 +25,11 @@ export function Settings({
 }) {
   const [name, setName] = useState(siteName);
   const [homepageUrl, setHomepageUrl] = useState("");
+  const [publicUrl, setPublicUrl] = useState("");
   const [iconUrl, setIconUrl] = useState<string | null>(null);
   const [globe, setGlobe] = useState(true);
+  // The form holds placeholders until the saved values arrive, and saving placeholders would erase them.
+  const [siteState, setSiteState] = useState<"loading" | "ready" | "failed">("loading");
   const [secrets, setSecrets] = useState<Array<{ name: string; set: boolean }>>([]);
   const [manageable, setManageable] = useState(false);
   const [nextName, setNextName] = useState("");
@@ -36,21 +41,41 @@ export function Settings({
   const [pending, setPending] = useState(false);
   const [secretBusy, setSecretBusy] = useState(false);
   const [iconBusy, setIconBusy] = useState(false);
+  const [droppedIcon, setDroppedIcon] = useState<File | null>(null);
   const [sampleBusy, setSampleBusy] = useState(false);
   const [pendingSamples, setPendingSamples] = useState(false);
   const [sampleNote, setSampleNote] = useState<string | null>(null);
   const { flash, flashOk } = useActionFlash();
+  // The server takes secret changes from a superadmin only, so nobody else is offered them.
+  const canEditSecrets = me.role === "superadmin";
 
-  async function refresh() {
-    const site = await api<{ siteName: string; homepageUrl: string; iconUrl: string | null; globe: boolean }>(
+  /** Fills the Public site form from the server. Only on arrival and after that form is saved, so it never replaces unsaved edits. */
+  async function refreshSite(): Promise<string | null> {
+    const site = await api<{ siteName: string; homepageUrl: string; publicUrl: string; iconUrl: string | null; globe: boolean }>(
       "/api/ops/settings",
     );
     if (site.ok) {
       setName(site.data.siteName);
       setHomepageUrl(site.data.homepageUrl);
+      setPublicUrl(site.data.publicUrl ?? "");
       setIconUrl(site.data.iconUrl);
       setGlobe(site.data.globe !== false);
+      setSiteState("ready");
+      return null;
     }
+    return site.error || "Could not load the site settings.";
+  }
+
+  async function loadSite() {
+    setSiteState("loading");
+    const failed = await refreshSite();
+    if (failed) {
+      setSiteState("failed");
+      setError(failed);
+    }
+  }
+
+  async function refreshSecrets() {
     const secs = await api<{ secrets: Array<{ name: string; set: boolean }>; manageable: boolean }>("/api/ops/secrets");
     if (secs.ok) {
       setSecrets(secs.data.secrets);
@@ -59,28 +84,32 @@ export function Settings({
   }
 
   useEffect(() => {
-    void refresh();
-  }, [siteName]);
+    void loadSite();
+    void refreshSecrets();
+  }, []);
 
+  // A dropped file is held for a confirmation. The icon is public, and a drop is easy to make by accident.
   useEffect(() => {
     if (!incomingIcon) return;
-    void uploadIcon(incomingIcon).finally(() => onIncomingIconConsumed?.());
+    setDroppedIcon(incomingIcon);
+    onIncomingIconConsumed?.();
   }, [incomingIcon]);
 
   async function saveName(e: React.FormEvent) {
     e.preventDefault();
+    if (siteState !== "ready") return;
     setError(null);
     setPending(true);
     const res = await api("/api/ops/settings", {
       method: "PATCH",
-      body: JSON.stringify({ siteName: name, homepageUrl, globe }),
+      body: JSON.stringify({ siteName: name, homepageUrl, publicUrl, globe }),
     });
     setPending(false);
     if (!res.ok) {
       setError(res.error);
       return;
     }
-    await onChange();
+    await Promise.all([refreshSite(), onChange()]);
     flashOk();
   }
 
@@ -104,7 +133,7 @@ export function Settings({
       setNextValue("");
       setRotatingSecret(null);
       setRotateValue("");
-      await refresh();
+      await refreshSecrets();
       await onChange();
     } finally {
       setSecretBusy(false);
@@ -130,7 +159,7 @@ export function Settings({
         setError(res.error);
         return;
       }
-      await refresh();
+      await refreshSecrets();
       await onChange();
     } finally {
       setSecretBusy(false);
@@ -219,7 +248,23 @@ export function Settings({
                 type="url"
                 value={homepageUrl}
                 onChange={(e) => setHomepageUrl(e.target.value)}
+                disabled={siteState === "failed"}
                 placeholder="https://example.com"
+              />
+            </label>
+            <label className="check-row" htmlFor="site-public-url">
+              <span className="check-row-k">
+                Public URL
+                <InfoTip>Address of this status page, used for the links in alerts. Leave empty to use the address you open the admin on.</InfoTip>
+              </span>
+              <input
+                id="site-public-url"
+                className="check-plain check-plain-mono"
+                type="url"
+                value={publicUrl}
+                onChange={(e) => setPublicUrl(e.target.value)}
+                disabled={siteState === "failed"}
+                placeholder="https://status.example.com"
               />
             </label>
             <div className="check-row">
@@ -251,14 +296,30 @@ export function Settings({
                 <InfoTip>Desktop WebGPU globe on the public status page. Off keeps the flat edge map on wide screens.</InfoTip>
               </span>
               <span className="check-row-hint">Show on wide screens</span>
-              <input id="site-globe" type="checkbox" checked={globe} onChange={(e) => setGlobe(e.target.checked)} />
+              <input id="site-globe" type="checkbox" checked={globe} onChange={(e) => setGlobe(e.target.checked)} disabled={siteState === "failed"} />
             </label>
           </section>
           <div className="check-form-actions">
-            <button className="btn btn-primary btn-flash" disabled={pending} type="submit">
+            <button className="btn btn-primary btn-flash" disabled={pending || siteState !== "ready"} type="submit">
               {pending ? "Saving…" : flash ? "Saved" : "Save"}
             </button>
+            {siteState === "failed" ? (
+              <button className="btn btn-secondary" type="button" onClick={() => { setError(null); void loadSite(); }}>
+                Retry
+              </button>
+            ) : null}
           </div>
+          <ConfirmDialog
+            open={droppedIcon != null}
+            title={`Use ${droppedIcon?.name || "this image"} as the site icon?`}
+            body="It replaces the current icon and favicon on the public status page."
+            confirmLabel="Use as site icon"
+            pending={iconBusy}
+            onCancel={() => setDroppedIcon(null)}
+            onConfirm={() => {
+              if (droppedIcon) void uploadIcon(droppedIcon).finally(() => setDroppedIcon(null));
+            }}
+          />
         </form>
 
         {me.role === "superadmin" ? <Operators me={me} /> : null}
@@ -270,13 +331,21 @@ export function Settings({
           <div className="set-card-head">
             <h2 className="section-title">Secrets</h2>
             <p className="section-copy">
-              Encrypted key-value pairs used by checks and alerts. Once set, values can only be rotated (never read back).
+              Encrypted key-value pairs used by checks and alerts.{" "}
+              {manageable
+                ? "Once set, values can only be rotated (never read back)."
+                : "Values are set with wrangler secret put NAME and are never read back."}
+              {canEditSecrets ? (
+                <InfoTip>A secret that is set cannot be removed here. Delete its value with wrangler secret delete NAME first, then remove the name.</InfoTip>
+              ) : (
+                " Only a superadmin can add, rotate or remove them."
+              )}
             </p>
           </div>
           {secrets.length === 0 ? (
             <div className="set-empty">
               <svg className="inline-block size-4 text-muted opacity-60" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"><path d="M8 1v4M8 11v4M1 8h4M11 8h4"/></svg>
-              {" "}No secrets yet. Add one below.
+              {" "}{canEditSecrets ? "No secrets yet. Add one below." : "No secrets yet."}
             </div>
           ) : (
             <ul className="check-sheet secret-list">
@@ -288,7 +357,7 @@ export function Settings({
                     </span>
                     <code className="set-secret-name">{row.name}</code>
                     <span className={`set-pill ${row.set ? "is-on" : ""}`}>{row.set ? "Set" : "Missing"}</span>
-                    {row.set && manageable ? (
+                    {secretActions(me.role, row, manageable).rotate ? (
                       <button
                         className="check-quiet check-quiet-ink"
                         type="button"
@@ -298,14 +367,16 @@ export function Settings({
                         Rotate
                       </button>
                     ) : null}
-                    <button
-                      className="check-quiet check-quiet-bad"
-                      type="button"
-                      disabled={secretBusy}
-                      onClick={() => setPendingRemove(row.name)}
-                    >
-                      Remove
-                    </button>
+                    {secretActions(me.role, row, manageable).remove ? (
+                      <button
+                        className="check-quiet check-quiet-bad"
+                        type="button"
+                        disabled={secretBusy}
+                        onClick={() => setPendingRemove(row.name)}
+                      >
+                        Remove
+                      </button>
+                    ) : null}
                   </div>
                   {rotatingSecret === row.name ? (
                     <div className="secret-rotate">
@@ -329,41 +400,43 @@ export function Settings({
               ))}
             </ul>
           )}
-          <form id="secret-add" className="secret-add-form" onSubmit={addSecret} aria-label="Add secret">
-            <div className="secret-add-fields">
-              <input
-                id="secret-name"
-                className="input"
-                value={nextName}
-                onChange={(e) => setNextName(e.target.value.toUpperCase())}
-                disabled={secretBusy}
-                placeholder="NAME (e.g. API_TOKEN)"
-                autoComplete="off"
-              />
-              {manageable ? (
+          {canEditSecrets ? (
+            <form id="secret-add" className="secret-add-form" onSubmit={addSecret} aria-label="Add secret">
+              <div className="secret-add-fields">
                 <input
-                  id="secret-value"
+                  id="secret-name"
                   className="input"
-                  type="password"
-                  value={nextValue}
-                  onChange={(e) => setNextValue(e.target.value)}
+                  value={nextName}
+                  onChange={(e) => setNextName(e.target.value.toUpperCase())}
                   disabled={secretBusy}
-                  placeholder="Value (optional)"
+                  placeholder="NAME (e.g. API_TOKEN)"
                   autoComplete="off"
                 />
-              ) : null}
-            </div>
-            <div className="secret-add-actions">
-              <button className="btn btn-primary btn-sm" disabled={secretBusy || !nextName.trim()} type="submit">
-                Add secret
-              </button>
-              {!manageable ? <span className="text-xs text-muted">Set value later via <code>wrangler secret put NAME</code></span> : null}
-            </div>
-          </form>
+                {manageable ? (
+                  <input
+                    id="secret-value"
+                    className="input"
+                    type="password"
+                    value={nextValue}
+                    onChange={(e) => setNextValue(e.target.value)}
+                    disabled={secretBusy}
+                    placeholder="Value (optional)"
+                    autoComplete="off"
+                  />
+                ) : null}
+              </div>
+              <div className="secret-add-actions">
+                <button className="btn btn-primary btn-sm" disabled={secretBusy || !nextName.trim()} type="submit">
+                  Add secret
+                </button>
+                {!manageable ? <span className="text-xs text-muted">Set value later via <code>wrangler secret put NAME</code></span> : null}
+              </div>
+            </form>
+          ) : null}
           <ConfirmDialog
             open={pendingRemove != null}
             title={`Remove ${pendingRemove ?? "this secret"}?`}
-            body="The Worker secret value is not deleted automatically. Existing checks keep their reference, but this name disappears from the picker."
+            body="This name has no value on the Worker. Existing checks keep their reference, but the name disappears from the picker."
             confirmLabel="Remove secret"
             pending={secretBusy}
             onCancel={() => setPendingRemove(null)}
@@ -373,7 +446,7 @@ export function Settings({
           />
         </section>
 
-        <AlertChannels secrets={secrets} onSecretsChange={refresh} />
+        <AlertChannels secrets={secrets} onSecretsChange={refreshSecrets} />
       </div>
 
       <div className="settings-row">
@@ -400,6 +473,8 @@ export function Settings({
             onConfirm={() => void populateSamples()}
           />
         </section>
+
+        <OwnPassword />
       </div>
     </div>
   );
@@ -441,18 +516,29 @@ function AlertChannels({
   const [pending, setPending] = useState(false);
   const [tested, setTested] = useState<string | null>(null);
 
-  async function refresh() {
+  async function refresh(): Promise<AlertChannel[] | null> {
     const res = await api<{ channels: AlertChannel[] }>("/api/ops/alert-channels");
-    if (res.ok) setChannels(res.data.channels);
+    if (!res.ok) return null;
+    setChannels(res.data.channels);
+    return res.data.channels;
+  }
+
+  /** Moves the Name field off a name that is in use, so the next add cannot land on an existing channel. */
+  function suggestFreeId(list: AlertChannel[] | null) {
+    if (list) setId((current) => uniqueChannelId(current, list.map((channel) => channel.id)));
   }
 
   useEffect(() => {
-    void refresh();
+    void refresh().then(suggestFreeId);
   }, []);
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    if (channels.some((channel) => channel.id === id)) {
+      setError(`A channel named ${id} already exists. Pick another name, or remove that channel first.`);
+      return;
+    }
     setPending(true);
     const res = await api("/api/ops/alert-channels", {
       method: "POST",
@@ -463,7 +549,8 @@ function AlertChannels({
       setError(res.error);
       return;
     }
-    await Promise.all([refresh(), onSecretsChange()]);
+    const [list] = await Promise.all([refresh(), onSecretsChange()]);
+    suggestFreeId(list);
   }
 
   async function remove(channelId: string) {
@@ -562,6 +649,91 @@ function AlertChannels({
         </div>
       </form>
       {error ? <div className="px-[0.9rem] pb-2"><ErrorText>{error}</ErrorText></div> : null}
+    </section>
+  );
+}
+
+function OwnPassword() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const { flash, flashOk } = useActionFlash();
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (next !== confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setPending(true);
+    const res = await api("/api/ops/me/password", { method: "POST", body: JSON.stringify({ current, password: next }) });
+    setPending(false);
+    if (!res.ok) {
+      setError(res.error);
+      return;
+    }
+    setCurrent("");
+    setNext("");
+    setConfirm("");
+    flashOk();
+  }
+
+  return (
+    <section className="card set-card">
+      <div className="set-card-head">
+        <h2 className="section-title">Your password</h2>
+        <p className="section-copy">Changing it signs you out everywhere else. This browser stays signed in.</p>
+      </div>
+      <form id="own-password" className="check-sheet" onSubmit={save} aria-label="Change your password">
+        <label className="check-row" htmlFor="pw-current">
+          <span className="check-row-k">Current</span>
+          <input
+            id="pw-current"
+            className="check-plain"
+            type="password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            autoComplete="current-password"
+            required
+          />
+        </label>
+        <label className="check-row" htmlFor="pw-next">
+          <span className="check-row-k">New</span>
+          <input
+            id="pw-next"
+            className="check-plain"
+            type="password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            placeholder="12+ characters"
+            autoComplete="new-password"
+            minLength={12}
+            required
+          />
+        </label>
+        <label className="check-row" htmlFor="pw-confirm">
+          <span className="check-row-k">Confirm</span>
+          <input
+            id="pw-confirm"
+            className="check-plain"
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            autoComplete="new-password"
+            minLength={12}
+            required
+          />
+        </label>
+      </form>
+      <div className="check-form-actions">
+        <button className="btn btn-primary btn-flash" disabled={pending} type="submit" form="own-password">
+          {pending ? "Saving…" : flash ? "Saved" : "Change password"}
+        </button>
+      </div>
+      {error ? <div className="px-[0.9rem]"><ErrorText>{error}</ErrorText></div> : null}
     </section>
   );
 }

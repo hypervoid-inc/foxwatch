@@ -15,7 +15,9 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    "types": []
   },
-  "include": ["apps/web/src"]
+  "include": ["apps/web/src"],
+  "exclude": ["apps/web/src/index-css.test.ts"]
 }

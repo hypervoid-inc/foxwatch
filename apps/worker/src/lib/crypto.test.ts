@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { tokenEquals, sha256Hex } from "./crypto.ts";
-import { publicSnapshot } from "@foxwatch/engine";
+import { publicSnapshot, type PublicSnapshot } from "@foxwatch/engine";
+
+/**
+ * A snapshot as an older Worker left it in KV, before `maintenance` and
+ * `observers` existed. The renderers still have to accept one.
+ */
+type StoredSnapshot = Omit<PublicSnapshot, "maintenance" | "observers"> & Partial<Pick<PublicSnapshot, "maintenance" | "observers">>;
+const stored = (snap: StoredSnapshot) => snap as PublicSnapshot;
 
 describe("ops token compare", () => {
   it("rejects missing and mismatched tokens", async () => {
@@ -18,7 +25,7 @@ describe("ops token compare", () => {
 
 describe("public snapshot shape", () => {
   it("does not include check urls, headers, or error bodies", () => {
-    const snap = publicSnapshot({
+    const snap = publicSnapshot(stored({
       siteName: "Acme",
       homepageUrl: null,
       iconUrl: null,
@@ -45,7 +52,7 @@ describe("public snapshot shape", () => {
         },
       ],
       incidents: [],
-    });
+    }));
     const json = JSON.stringify(snap);
     expect(JSON.stringify(snap.groups)).not.toMatch(/https?:\/\//);
     expect(json.toLowerCase()).not.toContain("authorization");
@@ -55,7 +62,7 @@ describe("public snapshot shape", () => {
   });
 
   it("keeps a public homepage url on the snapshot", () => {
-    const snap = publicSnapshot({
+    const snap = publicSnapshot(stored({
       siteName: "Acme",
       homepageUrl: "https://construct.com/",
       iconUrl: "/icon?v=1",
@@ -65,14 +72,14 @@ describe("public snapshot shape", () => {
       generatedAt: 1,
       groups: [],
       incidents: [],
-    });
+    }));
     expect(snap.homepageUrl).toBe("https://construct.com/");
     expect(snap.iconUrl).toBe("/icon?v=1");
     expect(snap.globe).toBe(true);
   });
 
   it("keeps globe off when the snapshot asks", () => {
-    const snap = publicSnapshot({
+    const snap = publicSnapshot(stored({
       siteName: "Acme",
       homepageUrl: null,
       iconUrl: null,
@@ -83,12 +90,12 @@ describe("public snapshot shape", () => {
       generatedAt: 1,
       groups: [],
       incidents: [],
-    });
+    }));
     expect(snap.globe).toBe(false);
   });
 
   it("copies region impact onto the public snapshot", () => {
-    const snap = publicSnapshot({
+    const snap = publicSnapshot(stored({
       siteName: "Acme",
       homepageUrl: null,
       iconUrl: null,
@@ -126,7 +133,7 @@ describe("public snapshot shape", () => {
         },
       ],
       incidents: [],
-    });
+    }));
     expect(snap.groups[0]?.impact?.all).toBe(false);
     expect(snap.groups[0]?.impact?.items).toEqual([
       { region: "apac", label: "APAC", detail: "12082ms", outcome: "degraded" },
@@ -148,7 +155,7 @@ describe("public html", () => {
       latencyMinMs: null,
       latencyMaxMs: null,
     }));
-    const html = renderPublicHtml({
+    const html = renderPublicHtml(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -173,11 +180,12 @@ describe("public html", () => {
         },
       ],
       incidents: [],
-    });
+    }));
     expect(html).toContain("We&#39;re fully operational.");
     expect(html).toContain("System status");
     expect(html).not.toContain("Subscribe");
-    expect(html).not.toContain('href="/feed.xml"');
+    // Feed readers find the feed through <head>; nothing on the page links to it.
+    expect(html).not.toMatch(/<a [^>]*href="\/feed\.xml"/);
     expect(html).toContain("No incidents");
     expect(html).toContain('id="live-banner"');
     expect(html).toContain('id="live-systems"');
@@ -187,7 +195,7 @@ describe("public html", () => {
     expect(html).toContain("/live");
     expect(html).toContain("/api/here.json");
     expect(html).toContain('id="globe-stage"');
-    expect(html).toContain('id="globe-land"');
+    expect(html).toContain('el.id="globe-land"');
     expect(html).toContain("__fwGlobe");
     expect(html).toContain("overflow-x: hidden");
     expect(html).toMatch(/status-globe\/main\.ts|\/assets\/globe\.js/);
@@ -222,21 +230,21 @@ describe("public html", () => {
       stale: false,
       lastTick: 1,
       generatedAt: 1,
-      groups,
+      groups: groups.map((g) => ({ ...g, uptime90: null })),
       incidents: [],
     });
 
     expect(
       renderBannerBlock(
-        snap("degraded", [
+        stored(snap("degraded", [
           { id: "api", name: "API", components: [component("checkout", "Checkout", "degraded")] },
-        ]),
+        ])),
       ),
     ).toContain("API is impacted.");
 
     expect(
       renderBannerBlock(
-        snap("degraded", [
+        stored(snap("degraded", [
           {
             id: "api",
             name: "API",
@@ -246,37 +254,37 @@ describe("public html", () => {
             ],
           },
           { id: "gw", name: "Inference Gateway", components: [component("gw", "Inference Gateway", "degraded")] },
-        ]),
+        ])),
       ),
     ).toContain("API and Inference Gateway are impacted.");
 
     expect(
       renderBannerBlock(
-        snap("degraded", [
+        stored(snap("degraded", [
           { id: "api", name: "API", components: [component("api", "API", "degraded")] },
           { id: "os", name: "OS", components: [component("os", "OS", "degraded")] },
           { id: "mem", name: "Memory", components: [component("mem", "Memory", "degraded")] },
-        ]),
+        ])),
       ),
     ).toContain("API, OS, and Memory are impacted.");
 
     expect(
       renderBannerBlock(
-        snap("failing", [{ id: "api", name: "API", components: [component("api", "API", "failing")] }]),
+        stored(snap("failing", [{ id: "api", name: "API", components: [component("api", "API", "failing")] }])),
       ),
     ).toContain("API is unavailable.");
 
-    expect(renderBannerBlock(snap("failing", []))).toContain(
+    expect(renderBannerBlock(stored(snap("failing", [])))).toContain(
       "Some systems are currently unavailable. We&#39;re working to restore service.",
     );
-    expect(renderBannerBlock(snap("degraded", []))).toContain(
+    expect(renderBannerBlock(stored(snap("degraded", [])))).toContain(
       "Some systems are impacted. We&#39;re investigating and will post updates here.",
     );
   });
 
   it("omits globe assets when the snapshot disables the globe", async () => {
     const { renderPublicHtml } = await import("./public-html.ts");
-    const html = renderPublicHtml({
+    const html = renderPublicHtml(stored({
       siteName: "Acme",
       globe: false,
       banner: "fully_operational",
@@ -296,7 +304,7 @@ describe("public html", () => {
           checkedAt: 1,
         },
       ],
-    });
+    }));
     expect(html).toContain("From the edge");
     expect(html).toContain('id="live-mesh"');
     expect(html).not.toContain('id="globe-stage"');
@@ -305,20 +313,17 @@ describe("public html", () => {
     expect(html).not.toContain("status-globe");
     expect(html).not.toContain("/assets/globe.js");
     expect(html).not.toContain("fw-globe-gpu");
-    expect(html).toMatch(/body:has\(#globe-stage\) #live-mesh\.mesh \{ display: none; \}/);
+    expect(html).toMatch(/html\.globe-on body:has\(#globe-stage\) #live-mesh \.mesh-plot \{ display: none; \}/);
   });
 
   it("varies tick height by latency and keeps empty days short", async () => {
-    const { renderPublicHtml, tickHeightPct, latencyAxisX } = await import("./public-html.ts");
+    const { renderPublicHtml, tickHeightPct } = await import("./public-html.ts");
     expect(tickHeightPct(null, 200)).toBe(22);
     expect(tickHeightPct(200, 200, true)).toBe(100);
     expect(tickHeightPct(50, 200, true)).toBe(52);
     expect(tickHeightPct(null, 200, true)).toBe(36);
-    expect(latencyAxisX(0, 100)).toBe(8);
-    expect(latencyAxisX(100, 100)).toBe(92);
-    expect(latencyAxisX(50, 100)).toBe(50);
 
-    const html = renderPublicHtml({
+    const html = renderPublicHtml(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -371,19 +376,15 @@ describe("public html", () => {
         },
       ],
       incidents: [],
-    });
+    }));
     expect(html).toContain('style="--h:22%"');
     expect(html).toContain('style="--h:52%"');
     expect(html).toContain('style="--h:100%"');
-    expect(html).toContain("<b>4</b> checks");
-    expect(html).toContain("<b>12</b> checks");
-    expect(html).toContain('class="tip-lat"');
-    expect(html).toContain("min 40ms, avg 50ms, max 80ms");
-    expect(html).toContain("min 90ms, avg 200ms, max 890ms");
-    expect(html).toContain('class="tip-lat-mark min"');
-    expect(html).toContain('class="tip-lat-mark avg"');
-    expect(html).toContain('class="tip-lat-mark max"');
-    expect(html).toContain('class="tick"');
+    // A day is one empty element; the tooltip is built in the browser from these attributes.
+    expect(html).toContain('data-c="4" data-l="50,40,80"></span>');
+    expect(html).toContain('data-c="12" data-l="200,90,890"></span>');
+    expect(html).not.toContain('class="tip"');
+    expect(html).not.toContain('class="tick"');
     expect(html).not.toContain("50ms avg");
   });
 
@@ -400,7 +401,7 @@ describe("public html", () => {
         latencyMaxMs: null,
       },
     ];
-    const html = renderPublicHtml({
+    const html = renderPublicHtml(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -434,7 +435,7 @@ describe("public html", () => {
         },
       ],
       incidents: [],
-    });
+    }));
     expect(html).toContain("<details>");
     expect(html).toContain("<summary");
     expect(html).toContain('class="chev"');
@@ -487,17 +488,17 @@ describe("public html", () => {
       ],
       incidents: [],
     };
-    const a = snapshotEtag(base);
-    const b = snapshotEtag({ ...base, generatedAt: 99 });
-    const c = snapshotEtag({ ...base, banner: "degraded" });
+    const a = snapshotEtag(stored(base));
+    const b = snapshotEtag(stored({ ...base, generatedAt: 99 }));
+    const c = snapshotEtag(stored({ ...base, banner: "degraded" }));
     expect(a).toBe(b);
     expect(a).not.toBe(c);
-    const live = renderLivePayload(base);
+    const live = renderLivePayload(stored(base));
     expect(live.etag).toBe(a);
     expect(live.banner).toContain("id=\"live-banner\"");
     expect(live.systems).toContain("data-group=\"api\"");
     expect(live.mesh).toContain('id="live-mesh"');
-    const withObs = snapshotEtag({
+    const withObs = snapshotEtag(stored({
       ...base,
       observers: [
         {
@@ -510,7 +511,7 @@ describe("public html", () => {
           checkedAt: 1,
         },
       ],
-    });
+    }));
     expect(withObs).not.toBe(a);
   });
 });
@@ -545,7 +546,7 @@ describe("worker path routing", () => {
 describe("public brand", () => {
   it("defaults the header to the status page and the fox mark", async () => {
     const { renderPublicHtml } = await import("./public-html.ts");
-    const html = renderPublicHtml({
+    const html = renderPublicHtml(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -553,7 +554,7 @@ describe("public brand", () => {
       generatedAt: 1,
       groups: [],
       incidents: [],
-    });
+    }));
     expect(html).toContain('class="brand" href="/"');
     expect(html).toContain('class="brand-name"');
     expect(html).toContain('class="fox" src="/fox.png"');
@@ -584,7 +585,7 @@ describe("public brand", () => {
     expect(html).toContain("#0f9d7a");
     expect(html).not.toContain('class="site-icon"');
     const { renderLivePayload } = await import("./public-html.ts");
-    const live = renderLivePayload({
+    const live = renderLivePayload(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -592,7 +593,7 @@ describe("public brand", () => {
       generatedAt: 1,
       groups: [],
       incidents: [],
-    });
+    }));
     expect(live.brand).toContain('id="live-brand"');
     expect(live.brand).not.toContain("theme-toggle");
     expect(live.status).toBe("fully_operational");
@@ -612,14 +613,14 @@ describe("public brand", () => {
       groups: [],
       incidents: [],
     };
-    const html = renderPublicHtml(snap);
+    const html = renderPublicHtml(stored(snap));
     expect(html).toContain('href="https://construct.com/"');
     expect(html).toContain('src="/icon?v=9"');
     expect(html).toContain('rel="icon" href="/icon?v=9"');
     expect(html).toContain('class="foot-fox" src="/fox.png"');
     expect(html).toContain("Powered by Foxwatch");
     expect(html).not.toContain('class="fox"');
-    const live = renderLivePayload(snap);
+    const live = renderLivePayload(stored(snap));
     expect(live.icon).toBe("/icon?v=9");
     expect(live.status).toBe("fully_operational");
     expect(live.brand).toContain('href="https://construct.com/"');
@@ -636,11 +637,11 @@ describe("public brand", () => {
       groups: [],
       incidents: [],
     };
-    const html = renderPublicHtml(snap);
+    const html = renderPublicHtml(stored(snap));
     expect(html).toContain('data-banner="failing"');
     expect(html).toContain("#e11d48");
     expect(html).toContain("#d97706");
-    expect(renderLivePayload(snap).status).toBe("failing");
+    expect(renderLivePayload(stored(snap)).status).toBe("failing");
   });
 });
 
@@ -658,7 +659,7 @@ describe("region impact html", () => {
         latencyMaxMs: 100,
       },
     ];
-    const partial = renderPublicHtml({
+    const partial = renderPublicHtml(stored({
       siteName: "Acme",
       banner: "degraded",
       stale: false,
@@ -697,7 +698,7 @@ describe("region impact html", () => {
         },
       ],
       incidents: [],
-    });
+    }));
     expect(partial).toContain('class="impact"');
     expect(partial).toContain('data-region="apac"');
     expect(partial).toContain("APAC");
@@ -707,7 +708,7 @@ describe("region impact html", () => {
     expect(partial).toContain("Degraded in APAC 12082ms, East NA 11920ms");
     expect(partial).not.toContain(">All<");
 
-    const all = renderPublicHtml({
+    const all = renderPublicHtml(stored({
       siteName: "Acme",
       banner: "degraded",
       stale: false,
@@ -746,7 +747,7 @@ describe("region impact html", () => {
         },
       ],
       incidents: [],
-    });
+    }));
     expect(all).toContain(">All<");
     expect(all).toContain("Failing in all regions");
     expect(all).toContain('title="West NA 9000ms · West EU timeout"');
@@ -757,7 +758,7 @@ describe("region impact html", () => {
 describe("edge mesh html", () => {
   it("draws observer nodes and hides the card when there are none", async () => {
     const { renderPublicHtml, renderLivePayload } = await import("./public-html.ts");
-    const withObs = renderPublicHtml({
+    const withObs = renderPublicHtml(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -785,13 +786,13 @@ describe("edge mesh html", () => {
           checkedAt: 1,
         },
       ],
-    });
+    }));
     expect(withObs).toContain("From the edge");
     expect(withObs).toContain('class="mesh-plot"');
     expect(withObs).toContain('class="mesh-ocean"');
     expect(withObs).toContain("color-mix(in srgb, var(--empty) 72%, var(--line) 28%)");
     expect(withObs).toContain(".mesh-ocean { fill: var(--card); }");
-    expect(withObs).toContain("#live-mesh.mesh { display: none; }");
+    expect(withObs).toContain("#live-mesh .mesh-plot { display: none; }");
     expect(withObs).toContain("--globe-left");
     expect(withObs).toContain("overflow-y: scroll");
     expect(withObs).toContain("scrollbar-gutter: stable");
@@ -804,7 +805,14 @@ describe("edge mesh html", () => {
     expect(withObs).toContain("scale(0.97)");
     expect(withObs).toContain("--duration-enter: 700ms");
     expect(withObs).toContain("globe-focus var(--duration-enter) linear both");
-    expect(withObs).toContain("__fwRevealGlobe");
+    // The canvas renderer and the coastlines are fetched on wide screens only; neither is in the page.
+    const { GLOBE_CLIENT_SCRIPT: flat } = await import("./public-globe.ts");
+    const { globeAssetVersions, globeLandJson } = await import("./public-html.ts");
+    expect(withObs).not.toContain(flat);
+    expect(withObs).toContain(`/api/globe/2d.js?v=${globeAssetVersions().flat}`);
+    expect(withObs).toContain(`/api/globe/land.json?v=${globeAssetVersions().land}`);
+    expect(withObs).toContain('matchMedia("(min-width: 1100px) and (hover: hover) and (pointer: fine)")');
+    expect(flat).toContain("__fwRevealGlobe");
     expect(withObs).toContain("is-ready");
     expect(withObs).toContain("calc((100% - var(--max)) / 2)");
     expect(withObs).toContain('class="mesh-node ok has-ring"');
@@ -819,33 +827,32 @@ describe("edge mesh html", () => {
     expect(withObs).toContain("canvas.globe-labels");
     expect(withObs).toContain("z-index: 20");
     expect(withObs).toContain("inset: 0");
-    expect(withObs).toContain("nearGlobe");
-    expect(withObs).toContain("drawFacets");
-    expect(withObs).toContain("drawTag");
-    expect(withObs).toContain("spinning");
-    expect(withObs).toContain("IDLE_MS=1000");
-    expect(withObs).toContain("SPIN_IN_MS=1200");
-    expect(withObs).toContain("SPIN_OUT_MS=420");
-    expect(withObs).toContain("spinT");
-    expect(withObs).toContain("spinEase");
-    expect(withObs).toContain("strokeHop");
-    expect(withObs).toContain("HOP_STEPS");
-    expect(withObs).toContain('id="globe-land"');
+    expect(flat).toContain("nearGlobe");
+    expect(flat).toContain("drawFacets");
+    expect(flat).toContain("drawTag");
+    expect(flat).toContain("spinning");
+    expect(flat).toContain("IDLE_MS=1000");
+    expect(flat).toContain("SPIN_IN_MS=1200");
+    expect(flat).toContain("SPIN_OUT_MS=420");
+    expect(flat).toContain("spinT");
+    expect(flat).toContain("spinEase");
+    expect(flat).toContain("strokeHop");
+    expect(flat).toContain("HOP_STEPS");
+    expect(withObs).toContain('el.id="globe-land"');
     expect(withObs).toContain('class="mesh-sr"');
     expect(withObs).toContain("__fwGlobe");
     expect(withObs).toContain("__fwPickRegion");
-    expect(withObs).toContain("__fwGpuGlobe");
-    expect(withObs).toContain("fw-globe-gpu");
-    expect(withObs).toContain("fw-globe-fallback");
+    expect(flat).toContain("__fwGpuGlobe");
+    expect(flat).toContain("fw-globe-gpu");
+    expect(flat).toContain("fw-globe-fallback");
     expect(withObs).toMatch(/status-globe\/main\.ts|\/assets\/globe\.js/);
-    expect(withObs).toContain('script type="module"');
+    expect(withObs).toContain('el.type="module"');
     expect(withObs).not.toMatch(/jsdelivr|unpkg|cdnjs|cdn\./i);
-    expect(withObs).toMatch(/<script type="application\/json" id="globe-land">\[\[/);
-    expect(JSON.parse(withObs.slice(
-      withObs.indexOf(">", withObs.indexOf('id="globe-land"')) + 1,
-      withObs.indexOf("</script>", withObs.indexOf('id="globe-land"')),
-    ))).toEqual(expect.any(Array));
-    expect(renderLivePayload({
+    expect(withObs).not.toContain('<script type="application/json"');
+    expect(withObs.length).toBeLessThan(120_000);
+    expect(globeLandJson()).toMatch(/^\[\[\[/);
+    expect(JSON.parse(globeLandJson())).toEqual(expect.any(Array));
+    expect(renderLivePayload(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -864,9 +871,9 @@ describe("edge mesh html", () => {
           checkedAt: 1,
         },
       ],
-    }).mesh).toContain("From the edge");
+    })).mesh).toContain("From the edge");
     const { renderHistoryPage } = await import("./public-html.ts");
-    const history = renderHistoryPage({
+    const history = renderHistoryPage(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -874,7 +881,7 @@ describe("edge mesh html", () => {
       generatedAt: 1,
       groups: [],
       incidents: [],
-    });
+    }));
     expect(history).not.toContain('id="globe-stage"');
     expect(history).not.toContain("envelope=1.16");
     expect(history).not.toContain("status-globe");
@@ -891,7 +898,7 @@ describe("edge mesh html", () => {
       resolvedAt: null,
       updates: [{ status: "investigating", body: "Looking into it.", at: 1 }],
     };
-    const page = renderIncidentPage({
+    const page = renderIncidentPage(stored({
       siteName: "Acme",
       banner: "failing",
       stale: false,
@@ -899,13 +906,13 @@ describe("edge mesh html", () => {
       generatedAt: 1,
       groups: [],
       incidents: [open],
-    }, open);
+    }), open);
     expect(page).toContain("Checkout API is failing");
     expect(page).toContain("Looking into it.");
     expect(page).toContain("Back to status");
     expect(page).toContain('href="/"');
     expect(page).not.toContain('id="globe-stage"');
-    const missing = renderIncidentPage({
+    const missing = renderIncidentPage(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -913,9 +920,9 @@ describe("edge mesh html", () => {
       generatedAt: 1,
       groups: [],
       incidents: [],
-    }, null);
+    }), null);
     expect(missing).toContain("Incident not found");
-    const home = renderPublicHtml({
+    const home = renderPublicHtml(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -923,11 +930,11 @@ describe("edge mesh html", () => {
       generatedAt: 1,
       groups: [],
       incidents: [open],
-    });
+    }));
     expect(home).toContain('href="/incidents/inc99abcdefghijklmnop"');
     expect(home).toContain('#incident-');
     expect(home).toContain('location.replace("/incidents/"+m[1])');
-    expect(renderFeed({
+    expect(renderFeed(stored({
       siteName: "Acme",
       banner: "fully_operational",
       stale: false,
@@ -935,7 +942,7 @@ describe("edge mesh html", () => {
       generatedAt: 1,
       groups: [],
       incidents: [open],
-    }, "https://status.acme.test")).toContain("https://status.acme.test/incidents/inc99abcdefghijklmnop");
+    }), "https://status.acme.test")).toContain("https://status.acme.test/incidents/inc99abcdefghijklmnop");
   });
 });
 
@@ -945,7 +952,8 @@ describe("public csp", () => {
     const src = readFileSync(new URL("../app.ts", import.meta.url), "utf8");
     const match = src.match(/export const PUBLIC_HEADERS = \{[\s\S]*?"content-security-policy":\s*\n\s*"([^"]+)"/);
     const csp = match?.[1] ?? "";
-    expect(csp).toContain("script-src 'self' 'unsafe-inline'");
+    expect(csp).toContain("script-src 'self';");
+    expect(csp).not.toMatch(/script-src[^;]*unsafe-inline/);
     expect(csp).toContain("connect-src 'self'");
     expect(csp).not.toContain("wasm-unsafe-eval");
     expect(csp).not.toMatch(/https?:\/\//);

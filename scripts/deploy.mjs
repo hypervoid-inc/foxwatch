@@ -21,7 +21,7 @@ import {
   root,
   writeCloudWrangler,
 } from "./cloud-ids.mjs";
-import { parseJsonBlob, runVite, runWrangler, wranglerBin } from "./run.mjs";
+import { baselineMigrations, isAlreadyExists, parseJsonBlob, runVite, runWrangler, wranglerBin } from "./run.mjs";
 
 const queueName = alertsQueueName();
 ensureQueue(queueName);
@@ -35,10 +35,11 @@ if (known) {
 
 function deployWithIds(ids) {
   writeCloudWrangler(ids);
-  applyRemoteMigrations();
+  // Build first: a bundling failure must stop the run before production D1 is migrated.
   runVite(["build"]);
   const built = requireBuilt();
   applyCloudIds(built, ids);
+  applyRemoteMigrations();
   wranglerDeploy(built);
 }
 
@@ -76,18 +77,18 @@ function wranglerDeploy(configPath) {
 
 function ensureQueue(name) {
   try {
-    execFileSync(process.execPath, [wranglerBin, "queues", "create", name], {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    runWrangler(["queues", "create", name]);
   } catch (err) {
-    const text = `${err.stdout ?? ""}${err.stderr ?? ""}${err.message ?? ""}`;
-    if (/already (taken|exists)/i.test(text)) return;
+    const text = err.output ?? err.message ?? "";
+    if (isAlreadyExists(text)) return;
+    // Not fatal here: the queue may still exist, and `wrangler deploy` fails on
+    // the binding if it does not. Show why, so that failure is not a mystery.
+    console.warn(`Could not create queue ${name}:\n${text.trim()}`);
   }
 }
 
 function applyRemoteMigrations() {
+  baselineMigrations(cloudWranglerPath);
   execFileSync(
     process.execPath,
     [wranglerBin, "d1", "migrations", "apply", "DB", "--remote", "--config", cloudWranglerPath],

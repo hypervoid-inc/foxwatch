@@ -3,6 +3,7 @@ import {
   PUBLIC_ORIGIN_KEY,
   FOXWATCH_AVATAR_URL,
   FOXWATCH_GITHUB,
+  alertOrigin,
   discordExecuteUrl,
   discordPayload,
   discordTimestamp,
@@ -297,6 +298,47 @@ describe("discord helpers", () => {
     await rememberPublicOrigin(env, "https://status.acme.test");
     await rememberPublicOrigin(env, "not-a-url");
     expect(store.get(PUBLIC_ORIGIN_KEY)).toBe("https://status.acme.test");
+  });
+});
+
+describe("alert link origin", () => {
+  function kv(initial?: string) {
+    const store = new Map<string, string>(initial ? [[PUBLIC_ORIGIN_KEY, initial]] : []);
+    const calls = { get: 0, put: 0 };
+    const env = {
+      STATUS: {
+        get: async (key: string) => { calls.get++; return store.get(key) ?? null; },
+        put: async (key: string, value: string) => { calls.put++; store.set(key, value); },
+      },
+    } as never;
+    return { env, store, calls };
+  }
+
+  it("prefers the configured public URL, then the admin request, then the remembered origin", async () => {
+    const { env } = kv("https://foxwatch.acct.workers.dev");
+    expect(await alertOrigin(env, "https://status.acme.test", "https://foxwatch.acct.workers.dev")).toBe("https://status.acme.test");
+    expect(await alertOrigin(env, null, "https://admin.acme.test")).toBe("https://admin.acme.test");
+    expect(await alertOrigin(env, null)).toBe("https://foxwatch.acct.workers.dev");
+    expect(await alertOrigin(kv().env, null)).toBeNull();
+    expect(await alertOrigin(kv().env, "javascript:alert(1)", "not-a-url")).toBeNull();
+  });
+
+  it("links a card to the origin the caller resolved, over the one in the event", () => {
+    const card = discordPayload(base({ publicOrigin: "https://foxwatch.acct.workers.dev" }), CTX);
+    expect(card.embeds[0]!.url).toBe("https://status.acme.test");
+    const fallback = discordPayload(base({ publicOrigin: "https://foxwatch.acct.workers.dev" }), { siteName: "Acme" });
+    expect(fallback.embeds[0]!.url).toBe("https://foxwatch.acct.workers.dev");
+  });
+
+  it("reads KV once per isolate while the origin stays the same", async () => {
+    const { env, store, calls } = kv();
+    await rememberPublicOrigin(env, "https://status.acme.test");
+    await rememberPublicOrigin(env, "https://status.acme.test");
+    await rememberPublicOrigin(env, "https://status.acme.test");
+    expect(calls).toEqual({ get: 1, put: 1 });
+    await rememberPublicOrigin(env, "https://other.acme.test");
+    expect(store.get(PUBLIC_ORIGIN_KEY)).toBe("https://other.acme.test");
+    expect(calls).toEqual({ get: 2, put: 2 });
   });
 });
 

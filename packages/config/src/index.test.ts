@@ -11,7 +11,12 @@ import {
   configFromYamlLike,
   monitorFromFlat,
   MAX_REGIONS,
+  MAX_JSONPATH_LENGTH,
+  MAX_BODY_INCLUDES_LENGTH,
+  MAX_ASSERTION_VALUE_LENGTH,
+  parseJsonPath,
   REGIONS,
+  type HttpExpect,
 } from "./index.ts";
 
 const base = () =>
@@ -242,6 +247,85 @@ groups:
   });
 });
 
+describe("json path", () => {
+  it("parses dot, index and quoted bracket segments", () => {
+    expect(parseJsonPath("$")).toEqual([]);
+    expect(parseJsonPath("$.data.items[0].id")).toEqual(["data", "items", 0, "id"]);
+    expect(parseJsonPath("$[2][3]")).toEqual([2, 3]);
+    expect(parseJsonPath("$['status']")).toEqual(["status"]);
+    expect(parseJsonPath(`$.data["user-id"]`)).toEqual(["data", "user-id"]);
+    expect(parseJsonPath("$['a.b']['it\\'s'][0]")).toEqual(["a.b", "it's", 0]);
+    expect(parseJsonPath(`$.${"a".repeat(MAX_JSONPATH_LENGTH - 2)}`)).toHaveLength(1);
+  });
+
+  it("still reads the bare-key, dotted-index and trailing-dot forms older checks were saved with", () => {
+    expect(parseJsonPath("$status")).toEqual(["status"]);
+    expect(parseJsonPath("$data.items[0]")).toEqual(["data", "items", 0]);
+    expect(parseJsonPath("$data['user-id']")).toEqual(["data", "user-id"]);
+    expect(parseJsonPath("$.a.")).toEqual(["a"]);
+    expect(parseJsonPath("$.items[0].")).toEqual(["items", 0]);
+    expect(parseJsonPath("$.")).toEqual([]);
+    expect(parseJsonPath("$.[0]")).toEqual([0]);
+    expect(parseJsonPath("$.items.[0]")).toEqual(["items", 0]);
+    expect(parseJsonPath("$items.[0].[1].id.")).toEqual(["items", 0, 1, "id"]);
+  });
+
+  it("throws on anything it does not support instead of skipping it", () => {
+    for (const path of [
+      "",
+      "data",
+      "$..",
+      "$x-y",
+      "$.data.user-id",
+      "$.data..",
+      "$.data. ",
+      "$..data",
+      "$.a..",
+      "$..[0]",
+      "$.items..[0]",
+      "$.items.[*]",
+      "$.items.[-1]",
+      "$.['status']",
+      "$.*",
+      "$.items[*]",
+      "$.items[-1]",
+      "$.items[0:2]",
+      "$.items[?(@.ok)]",
+      "$[status]",
+      "$['status'",
+      "$.a b",
+      `$.${"a".repeat(MAX_JSONPATH_LENGTH)}`,
+    ]) {
+      expect(() => parseJsonPath(path), path).toThrow("jsonpath_invalid");
+    }
+    expect(() => parseJsonPath(42)).toThrow("jsonpath_invalid");
+  });
+
+  it("rejects expectations in config that the probe would refuse to run", () => {
+    const withExpect = (expect: HttpExpect) =>
+      defineConfig({
+        site: { name: "x" },
+        groups: [{ id: "g", name: "G", components: [{ id: "c", name: "C", checks: [http("a", { url: "https://example.com", expect })] }] }],
+      });
+    expect(() => withExpect({ assertions: [{ path: "$.data.user-id", op: "exists" }] })).toThrow(/JSON path "\$\.data\.user-id" is not supported/);
+    expect(() => withExpect({ jsonPath: { path: "$..status", exists: true } })).toThrow(/is not supported/);
+    expect(() => withExpect({ bodyIncludes: "x".repeat(MAX_BODY_INCLUDES_LENGTH + 1) })).toThrow(/bodyIncludes/);
+    expect(() =>
+      withExpect({ assertions: [{ path: "$.v", op: "matches", value: "*".repeat(MAX_ASSERTION_VALUE_LENGTH + 1) }] }),
+    ).toThrow(/assertion value/);
+    expect(() =>
+      withExpect({
+        status: 200,
+        bodyIncludes: "x".repeat(MAX_BODY_INCLUDES_LENGTH),
+        assertions: [
+          { path: "$.data['user-id']", op: "exists" },
+          { path: "$.version", op: "matches", value: "v?.*" },
+        ],
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe("planApply", () => {
   it("upserts git monitors and leaves ui monitors alone", () => {
     const cfg = base();
@@ -275,5 +359,27 @@ describe("planApply", () => {
     const plan = planApply(current, [desired[0]!], { keepDrift: true });
     expect(plan.unchanged).toEqual(["api-health"]);
     expect(plan.upsert).toHaveLength(0);
+  });
+});
+
+describe("header and secret name validation", () => {
+  const withHeaders = (headers: Record<string, string | ReturnType<typeof secret>>) =>
+    defineConfig({
+      site: { name: "x" },
+      secrets: ["SESSION_COOKIE"],
+      groups: [{ id: "g", name: "G", components: [{ id: "c", name: "C", checks: [http("a", { url: "https://example.com", headers })] }] }],
+    });
+
+  it("accepts a secret-backed Cookie and rejects headers the probe would drop", () => {
+    expect(() => withHeaders({ Cookie: secret("SESSION_COOKIE") })).not.toThrow();
+    for (const name of ["Host", "Proxy-Authorization", "Set-Cookie", "CF-Connecting-IP", "X-Forwarded-For"]) {
+      expect(() => withHeaders({ [name]: secret("SESSION_COOKIE") })).toThrow(/cannot be sent/);
+    }
+  });
+
+  it("rejects reserved secret names", () => {
+    expect(() => secret("FOXWATCH_CF_API_TOKEN")).toThrow(/reserved/);
+    expect(() => secret("ALLOW_HTTP_LOCAL")).toThrow(/reserved/);
+    expect(() => defineConfig({ site: { name: "x" }, secrets: ["FOXWATCH_CF_ACCOUNT_ID"], groups: [] })).toThrow(/reserved/);
   });
 });

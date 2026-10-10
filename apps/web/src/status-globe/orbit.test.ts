@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  aimOrbit,
+  aimScene,
   createOrbit,
   IDLE_MS,
+  orbitActive,
+  spinOnly,
   SPIN,
   SPIN_IN_MS,
   SPIN_OUT_MS,
@@ -77,5 +81,121 @@ describe("idle spin", () => {
     expect(orbit.spinT).toBe(0);
     expect(orbit.vYaw).toBe(0);
     expect(orbit.yaw).toBe(yaw0);
+  });
+
+  it("has nothing to animate at rest, so the frame loop can stop", () => {
+    const orbit = createOrbit();
+    expect(orbitActive(orbit)).toBe(false);
+
+    orbit.spinning = true;
+    expect(orbitActive(orbit)).toBe(true);
+    for (let i = 0; i < Math.ceil(SPIN_IN_MS / 16) + 2; i++) stepOrbit(orbit, 16, false);
+
+    // Paused: still active until the spin has eased all the way out.
+    orbit.spinning = false;
+    expect(orbitActive(orbit)).toBe(true);
+    let steps = 0;
+    while (orbitActive(orbit) && steps++ < 200) stepOrbit(orbit, 16, false);
+    expect(steps).toBeLessThan(200);
+    expect(orbit.spinT).toBe(0);
+    expect(stepOrbit(orbit, 16, false)).toBe(false);
+  });
+
+  it("stays active through a drag and the glide after it, then stops", () => {
+    const orbit = createOrbit();
+    orbit.dragging = true;
+    expect(orbitActive(orbit)).toBe(true);
+    expect(stepOrbit(orbit, 16, false)).toBe(false);
+
+    orbit.dragging = false;
+    orbit.vYaw = 0.02;
+    let steps = 0;
+    while (orbitActive(orbit) && steps++ < 500) expect(stepOrbit(orbit, 16, false)).toBe(true);
+    expect(steps).toBeGreaterThan(5);
+    expect(orbit.vYaw).toBe(0);
+    expect(stepOrbit(orbit, 16, false)).toBe(false);
+
+    // A flick too slow to glide leaves nothing to animate either.
+    orbit.vYaw = 0.0002;
+    expect(orbitActive(orbit)).toBe(false);
+  });
+
+  it("has nothing to animate under reduced motion", () => {
+    const orbit = createOrbit();
+    orbit.spinning = true;
+    orbit.spinT = 1;
+    orbit.vPitch = 0.05;
+    expect(stepOrbit(orbit, 16, true)).toBe(false);
+    expect(orbitActive(orbit)).toBe(false);
+  });
+
+  it("draws idle spin at the cruise rate and a drag or glide every frame", () => {
+    const orbit = createOrbit();
+    orbit.spinning = true;
+    orbit.spinT = 1;
+    expect(spinOnly(orbit)).toBe(true);
+    orbit.vYaw = 0.01;
+    expect(spinOnly(orbit)).toBe(false);
+    orbit.vYaw = 0;
+    orbit.dragging = true;
+    expect(spinOnly(orbit)).toBe(false);
+  });
+});
+
+describe("first aim", () => {
+  const nodes = [
+    { lat: 40, lng: -100 },
+    { lat: 50, lng: 10 },
+  ];
+  const you = { lat: -33.9, lng: 151.2 };
+  const at = (lat: number, lng: number) => {
+    const o = createOrbit();
+    aimOrbit(o, lat, lng);
+    return { yaw: o.yaw, pitch: o.pitch };
+  };
+  const pose = (o: { yaw: number; pitch: number }) => ({ yaw: o.yaw, pitch: o.pitch });
+
+  it("looks at the visitor when they are known from the start, and only once", () => {
+    const orbit = createOrbit();
+    aimScene(orbit, you, nodes);
+    expect(pose(orbit)).toEqual(at(you.lat, you.lng));
+    orbit.yaw += 1;
+    const turned = pose(orbit);
+    aimScene(orbit, you, nodes);
+    aimScene(orbit, null, nodes);
+    expect(pose(orbit)).toEqual(turned);
+  });
+
+  it("looks at the middle of the regions first, then at the visitor when they arrive late", () => {
+    const orbit = createOrbit();
+    aimScene(orbit, null, nodes);
+    expect(pose(orbit)).toEqual(at(45, -45));
+    aimScene(orbit, null, nodes);
+    expect(pose(orbit)).toEqual(at(45, -45));
+
+    aimScene(orbit, you, nodes);
+    expect(pose(orbit)).toEqual(at(you.lat, you.lng));
+    aimScene(orbit, { lat: 0, lng: 0 }, nodes);
+    expect(pose(orbit)).toEqual(at(you.lat, you.lng));
+  });
+
+  it("leaves a globe the visitor has turned where they put it", () => {
+    const orbit = createOrbit();
+    aimScene(orbit, null, nodes);
+    orbit.yaw = 2;
+    orbit.pitch = -0.3;
+    orbit.touched = true;
+    aimScene(orbit, you, nodes);
+    expect(pose(orbit)).toEqual({ yaw: 2, pitch: -0.3 });
+    // And does not fall back to the regions afterwards.
+    aimScene(orbit, null, nodes);
+    expect(pose(orbit)).toEqual({ yaw: 2, pitch: -0.3 });
+  });
+
+  it("waits for something to look at", () => {
+    const orbit = createOrbit();
+    aimScene(orbit, null, []);
+    expect(orbit.aimed).toBe(false);
+    expect(pose(orbit)).toEqual(pose(createOrbit()));
   });
 });

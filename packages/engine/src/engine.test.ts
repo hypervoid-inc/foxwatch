@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { http, secret } from "@foxwatch/config";
+import { http, secret, MAX_ASSERTION_VALUE_LENGTH, MAX_BODY_INCLUDES_LENGTH } from "@foxwatch/config";
 import {
   assertSafeUrl,
   bannerStatus,
   componentStatus,
   confirmFlip,
+  advanceMonitor,
+  componentTransition,
+  hasQuorum,
+  heartbeatRecheckMs,
+  type MonitorState,
   regionImpact,
   statusDotColor,
   publicObservers,
@@ -24,7 +29,9 @@ import {
   sampleTrajectory,
   evaluateHttp,
   heartbeatOutcome,
+  isPrivateHostname,
   parseHomepageUrl,
+  parsePublicUrl,
   redactText,
   resolveHeaders,
   runHttpProbe,
@@ -50,12 +57,76 @@ describe("url policy", () => {
     );
   });
 
+  it("only applies IPv6 prefix rules to IPv6 literals", () => {
+    for (const host of ["fd.io", "fdic.gov", "fcbarcelona.com", "fc2.com", "fe80.example.com"]) {
+      expect(assertSafeUrl(`https://${host}/`).hostname).toBe(host);
+      expect(isPrivateHostname(host)).toBe(false);
+    }
+    expect(assertSafeUrl("https://[2606:4700:4700::1111]/").hostname).toBe("[2606:4700:4700::1111]");
+    expect(assertSafeUrl("https://[::ffff:8.8.8.8]/").hostname).toBe("[::ffff:808:808]");
+  });
+
+  it("rejects private, loopback and IPv4-embedding IPv6 literals", () => {
+    for (const host of [
+      "[::1]",
+      "[0:0:0:0:0:0:0:1]",
+      "[::]",
+      "[fc00::1]",
+      "[fd12:3456:789a::1]",
+      "[fe80::1]",
+      "[fe90::1]",
+      "[febf::1]",
+      "[fec0::1]",
+      "[::ffff:127.0.0.1]",
+      "[::ffff:7f00:1]",
+      "[::ffff:169.254.169.254]",
+      "[::ffff:a9fe:a9fe]",
+      "[::ffff:10.0.0.1]",
+      "[::127.0.0.1]",
+      "[64:ff9b::a9fe:a9fe]",
+      "[64:ff9b::10.0.0.1]",
+      "[64:ff9b:1::1]",
+      "[2002:7f00:1::1]",
+      "[2002:c0a8:101::]",
+    ]) {
+      expect(() => assertSafeUrl(`https://${host}/`), host).toThrow(/private_address/);
+    }
+    // Raw forms the URL parser would have normalised, and ones it cannot read.
+    expect(isPrivateHostname("::ffff:192.168.1.1")).toBe(true);
+    expect(isPrivateHostname("0:0:0:0:0:ffff:7f00:1")).toBe(true);
+    expect(isPrivateHostname("fc::1")).toBe(true);
+    expect(isPrivateHostname("1:2:3")).toBe(true);
+    expect(isPrivateHostname("::1::")).toBe(true);
+    expect(isPrivateHostname("64:ff9b::8.8.8.8")).toBe(false);
+    expect(isPrivateHostname("2002:808:808::1")).toBe(false);
+  });
+
+  it("ignores a trailing dot on the hostname", () => {
+    expect(() => assertSafeUrl("https://localhost./")).toThrow(/private_address/);
+    expect(() => assertSafeUrl("https://app.localhost./")).toThrow(/private_address/);
+    expect(() => assertSafeUrl("https://db.internal./")).toThrow(/private_address/);
+    expect(() => assertSafeUrl("https://127.0.0.1./")).toThrow(/private_address/);
+    expect(isPrivateHostname("10.0.0.1.")).toBe(true);
+    expect(() => assertSafeUrl("http://localhost./", { allowHttpLocal: true })).toThrow(UrlPolicyError);
+    expect(assertSafeUrl("https://example.com./").hostname).toBe("example.com.");
+  });
+
   it("treats homepage urls as links, not fetch targets", () => {
     expect(parseHomepageUrl("")).toBe(null);
     expect(parseHomepageUrl("https://construct.com/app")).toBe("https://construct.com/app");
     expect(parseHomepageUrl("http://example.com")).toBe("http://example.com/");
     expect(() => parseHomepageUrl("javascript:alert(1)")).toThrow(UrlPolicyError);
     expect(() => parseHomepageUrl("https://user:pass@evil.example/")).toThrow(UrlPolicyError);
+  });
+
+  it("keeps the public url as an origin", () => {
+    expect(parsePublicUrl("")).toBe(null);
+    expect(parsePublicUrl(null)).toBe(null);
+    expect(parsePublicUrl(" https://status.example.com/history?x=1 ")).toBe("https://status.example.com");
+    expect(parsePublicUrl("http://127.0.0.1:8787")).toBe("http://127.0.0.1:8787");
+    expect(() => parsePublicUrl("javascript:alert(1)")).toThrow(UrlPolicyError);
+    expect(() => parsePublicUrl("https://user:pass@evil.example/")).toThrow(UrlPolicyError);
+    expect(() => parsePublicUrl(5)).toThrow(UrlPolicyError);
   });
 });
 
@@ -80,21 +151,79 @@ describe("secrets", () => {
     expect(res.missingSecret).toBe("API_HEALTH_TOKEN");
   });
 
-  it("strips hop-by-hop and cookie headers", () => {
+  it("strips hop-by-hop and network-owned headers", () => {
     const out = stripForbiddenHeaders({
       Host: "evil",
-      Cookie: "a=b",
+      "Set-Cookie": "a=b",
+      "Proxy-Authorization": "Basic x",
       "CF-Connecting-IP": "1.1.1.1",
+      "X-Forwarded-For": "1.1.1.1",
       Authorization: "Bearer x",
     });
-    expect(out.Host).toBeUndefined();
-    expect(out.Cookie).toBeUndefined();
-    expect(out.Authorization).toBe("Bearer x");
+    expect(out).toEqual({ Authorization: "Bearer x" });
+  });
+
+  it("sends a secret-backed Cookie to allowed hosts only", () => {
+    const headers = { Cookie: secret("SESSION_COOKIE") };
+    const env = { SESSION_COOKIE: "sid=abc" };
+    expect(resolveHeaders(headers, env, "app.example.com", ["app.example.com"]).headers).toEqual({ Cookie: "sid=abc" });
+    expect(resolveHeaders(headers, env, "evil.example.com", ["app.example.com"]).headers).toEqual({});
+    // A literal cookie never follows a redirect off the allowlist either.
+    expect(resolveHeaders({ Cookie: "sid=abc" }, {}, "evil.example.com", ["app.example.com"]).headers).toEqual({});
   });
 
   it("redacts tokens from snippets", () => {
     expect(redactText("Authorization: Bearer abc.def", ["abc.def"])).not.toContain("abc.def");
-    expect(redactText("Bearer super-secret-token")).toContain("[redacted]");
+    expect(redactText("Bearer super-secret-token")).toBe("Bearer [redacted]");
+  });
+
+  it("redacts every credential value, not the key name", () => {
+    const out = redactText('{"access_token":"abc123456","refresh_token":"zzz99999","password":"hunter2","user":"bob"}');
+    expect(out).toBe('{"access_token":[redacted],"refresh_token":[redacted],"password":[redacted],"user":"bob"}');
+    expect(redactText("grant_type=password&client_secret=s3cr3t&api_key=K123&page=2")).toBe(
+      "grant_type=password&client_secret=[redacted]&api_key=[redacted]&page=2",
+    );
+    expect(redactText(String.raw`{"detail":"{\"token\":\"esc123\"}"}`)).not.toContain("esc123");
+  });
+
+  it("redacts header lines, JWTs and long hex keys", () => {
+    const out = redactText("Set-Cookie: sid=abc123; Path=/\nCookie: a=b; c=d\nX-Api-Key: k-123\nAuthorization: Basic dXNlcjpwYXNz\nX-Other: fine");
+    for (const leaked of ["abc123", "a=b", "c=d", "k-123", "dXNlcjpwYXNz"]) expect(out).not.toContain(leaked);
+    expect(out).toContain("X-Other: fine");
+    expect(redactText("jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sflKxwRJSMeKKF2QT4 ok")).toBe("jwt [redacted] ok");
+    expect(redactText("key 0123456789abcdef0123456789abcdef sha 0123abc")).toBe("key [redacted] sha 0123abc");
+  });
+
+  it("redacts header values to the end of the line, whatever the scheme", () => {
+    expect(redactText("Authorization: Token abc123secretvalue")).toBe("Authorization: [redacted]");
+    expect(redactText("authorization: ApiKey zzz-key-value\nHost: example.com")).toBe("authorization: [redacted]\nHost: example.com");
+    expect(redactText("> Proxy-Authorization: Digest username=bob, response=6629fae4\r\n> Accept: */*")).toBe(
+      "> Proxy-Authorization: [redacted]\r\n> Accept: */*",
+    );
+    expect(redactText("user: bob\npassword: my pass phrase\n  X-Auth-Token: part one two\nstatus: locked")).toBe(
+      "user: bob\npassword: [redacted]\n  X-Auth-Token: [redacted]\nstatus: locked",
+    );
+    // Quoted and inline forms keep their own, narrower handling.
+    expect(redactText('{"authorization": "Token abc123", "user": "bob"}')).toBe('{"authorization": [redacted], "user": "bob"}');
+    expect(redactText("invalid token: abc123, retry later")).toBe("invalid token: [redacted], retry later");
+    expect(redactText('{"log":"Authorization: Token abc123","ok":false}')).toBe('{"log":"Authorization: [redacted]","ok":false}');
+  });
+
+  it("keeps snippets bounded on large bodies", () => {
+    expect(redactText("z".repeat(70_000) + ' "token":"late"').length).toBe(2048);
+    // A value cut off by the limit is still a value.
+    expect(redactText("x".repeat(2030) + ' "token":"abcdefghijklmnop"')).not.toContain("abcd");
+  });
+
+  it("stays fast on bodies that repeat a credential keyword", () => {
+    // Each of these took hundreds of ms when the key match could restart inside a word run.
+    const bodies = ["token".repeat(410), "token.".repeat(342), "apikey".repeat(342), "tokensecret".repeat(187)];
+    const started = performance.now();
+    for (const body of bodies) expect(redactText(body)).toBe(body.slice(0, 2048));
+    expect(performance.now() - started).toBeLessThan(100);
+    // Long keys still redact: the match begins at the keyword, not at the start of the key.
+    expect(redactText(`${"a.".repeat(200)}access_token=abc123`)).toBe(`${"a.".repeat(200)}access_token=[redacted]`);
+    expect(redactText(`${"token".repeat(40)}=abc123`)).toBe(`${"token".repeat(40)}=[redacted]`);
   });
 });
 
@@ -152,6 +281,64 @@ describe("http eval", () => {
         expect: { jsonPath: { path: "$..foo" } },
       }).errorClass,
     ).toBe("jsonpath");
+  });
+});
+
+describe("json path assertions", () => {
+  const evalBody = (body: unknown, expect: Parameters<typeof evaluateHttp>[0]["expect"]) =>
+    evaluateHttp({ status: 200, headers: {}, body: JSON.stringify(body), latencyMs: 1, expect });
+
+  it("fails an unsupported segment instead of dropping it", () => {
+    const body = { data: { id: 1 }, status: "ok" };
+    for (const path of ["$.data.user-id", "$[status]", "$.data..", "$x-y", "$.data[*]"]) {
+      const res = evalBody(body, { assertions: [{ path, op: "exists" }] });
+      expect(res.outcome, path).toBe("fail");
+      expect(res.errorClass).toBe("assertion");
+      expect(res.reason).toContain("invalid path");
+    }
+    expect(evalBody(body, { jsonPath: { path: "$.data.user-id", exists: true } }).errorClass).toBe("jsonpath");
+  });
+
+  it("keeps evaluating the bare-key, dotted-index and trailing-dot paths older checks were saved with", () => {
+    const body = { data: { items: [{ id: 5 }] }, status: "ok" };
+    expect(evalBody(body, { assertions: [{ path: "$status", op: "equals", value: "ok" }] }).outcome).toBe("pass");
+    expect(evalBody(body, { assertions: [{ path: "$data.items[0].id", op: "equals", value: 5 }] }).outcome).toBe("pass");
+    expect(evalBody(body, { assertions: [{ path: "$.status.", op: "equals", value: "ok" }] }).outcome).toBe("pass");
+    expect(evalBody(body, { assertions: [{ path: "$status", op: "equals", value: "down" }] }).outcome).toBe("fail");
+    expect(evalBody(body, { jsonPath: { path: "$status", equals: "ok" } }).outcome).toBe("pass");
+    expect(evalBody(body, { assertions: [{ path: "$.data.items.[0].id", op: "equals", value: 5 }] }).outcome).toBe("pass");
+    expect(evalBody(body, { assertions: [{ path: "$.data.items.[1]", op: "exists" }] }).outcome).toBe("fail");
+    expect(evalBody(body, { jsonPath: { path: "$.data.items.[0]", exists: true } }).outcome).toBe("pass");
+    expect(evalBody([{ id: 5 }], { assertions: [{ path: "$.[0].id", op: "equals", value: 5 }] }).outcome).toBe("pass");
+  });
+
+  it("reads quoted keys and chained indexes", () => {
+    const body = { data: { "user-id": 7, "a.b": [[1, 2], [3, 4]] }, status: "ok" };
+    expect(evalBody(body, { assertions: [{ path: "$.data['user-id']", op: "equals", value: 7 }] }).outcome).toBe("pass");
+    expect(evalBody(body, { assertions: [{ path: `$["status"]`, op: "equals", value: "ok" }] }).outcome).toBe("pass");
+    expect(evalBody(body, { assertions: [{ path: "$.data['a.b'][1][0]", op: "equals", value: 3 }] }).outcome).toBe("pass");
+    expect(evalBody(body, { assertions: [{ path: "$.data['missing-key']", op: "exists" }] }).outcome).toBe("fail");
+    expect(evalBody(body, { assertions: [{ path: "$.data['a.b'].length", op: "equals", value: 2 }] }).outcome).toBe("pass");
+  });
+
+  it("does not resolve inherited properties", () => {
+    const body = { data: {}, list: [] };
+    for (const path of ["$.constructor", "$.data.toString", "$.data.__proto__", "$.list.map", "$.data.hasOwnProperty"]) {
+      expect(evalBody(body, { assertions: [{ path, op: "exists" }] }).outcome, path).toBe("fail");
+      expect(evalBody(body, { assertions: [{ path, op: "not_exists" }] }).outcome, path).toBe("pass");
+    }
+  });
+
+  it("runs everything the save-time limits accept", () => {
+    const key = "k".repeat(200);
+    const needle = "n".repeat(MAX_BODY_INCLUDES_LENGTH);
+    const body = { [key]: needle, v: `a${"b".repeat(MAX_ASSERTION_VALUE_LENGTH - 1)}` };
+    expect(evalBody(body, { bodyIncludes: needle }).outcome).toBe("pass");
+    expect(evalBody(body, { bodyIncludes: `${needle}n` }).errorClass).toBe("body");
+    expect(evalBody(body, { assertions: [{ path: `$.${key}`, op: "exists" }] }).outcome).toBe("pass");
+    expect(
+      evalBody(body, { assertions: [{ path: "$.v", op: "matches", value: `?${"b".repeat(MAX_ASSERTION_VALUE_LENGTH - 1)}` }] }).outcome,
+    ).toBe("pass");
   });
 });
 
@@ -232,6 +419,123 @@ describe("runHttpProbe redirects", () => {
   });
 });
 
+describe("runHttpProbe redirect handling", () => {
+  type Seen = { url: string; method: string; body: string | null; contentType: string | null; auth: string | null };
+  function recorder(respond: (url: string, n: number) => Response) {
+    const seen: Seen[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const headers = new Headers(init?.headers);
+      seen.push({
+        url: String(input),
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? init.body : null,
+        contentType: headers.get("Content-Type"),
+        auth: headers.get("Authorization"),
+      });
+      return respond(String(input), seen.length);
+    };
+    return { seen, fetchImpl };
+  }
+  const redirect = (status: number, to: string) => new Response(null, { status, headers: { Location: to } });
+  const run = (check: ReturnType<typeof http>, fetchImpl: typeof fetch) =>
+    runHttpProbe(check, { secrets: { API_TOKEN: "sekrit-value" }, allowHttpLocal: false, fetchImpl, colo: "SFO" });
+
+  it("fails a redirect loop as a redirect error, whatever status is expected", async () => {
+    for (const expectation of [{}, { status: 302 }, { status: 200 }]) {
+      const { seen, fetchImpl } = recorder((url) => redirect(302, url.endsWith("/a") ? "/b" : "/a"));
+      const check = http("loop", { url: "https://example.com/a", timeout: "5s", interval: "1m", expect: expectation });
+      const result = await run(check, fetchImpl);
+      expect(result.outcome).toBe("fail");
+      expect(result.errorClass).toBe("redirect");
+      expect(result.statusCode).toBe(302);
+      expect(seen).toHaveLength(6);
+    }
+  });
+
+  it("still follows five redirects to a final response", async () => {
+    const { seen, fetchImpl } = recorder((_url, n) => (n <= 5 ? redirect(302, `/hop${n}`) : new Response("ok", { status: 200 })));
+    const check = http("chain", { url: "https://example.com/start", timeout: "5s", interval: "1m" });
+    const result = await run(check, fetchImpl);
+    expect(result.outcome).toBe("pass");
+    expect(seen).toHaveLength(6);
+    expect(seen[5]?.url).toBe("https://example.com/hop5");
+  });
+
+  it("evaluates a 3xx as the response when redirects are not followed", async () => {
+    const { seen, fetchImpl } = recorder(() => redirect(301, "/elsewhere"));
+    const check = http("moved", {
+      url: "https://example.com/old",
+      timeout: "5s",
+      interval: "1m",
+      followRedirects: false,
+      expect: { status: 301 },
+    });
+    expect((await run(check, fetchImpl)).outcome).toBe("pass");
+    expect(seen).toHaveLength(1);
+  });
+
+  it("turns a POST into a bodiless GET on 301, 302 and 303", async () => {
+    for (const status of [301, 302, 303]) {
+      const { seen, fetchImpl } = recorder((_url, n) => (n === 1 ? redirect(status, "/done") : new Response("ok", { status: 200 })));
+      const check = http("submit", {
+        url: "https://example.com/submit",
+        method: "POST",
+        body: '{"a":1}',
+        headers: { "Content-Type": "application/json", Authorization: secret("API_TOKEN") },
+        timeout: "5s",
+        interval: "1m",
+      });
+      const result = await run(check, fetchImpl);
+      expect(result.outcome).toBe("pass");
+      expect(seen[0]).toMatchObject({ method: "POST", body: '{"a":1}', contentType: "application/json" });
+      expect(seen[1]).toMatchObject({
+        url: "https://example.com/done",
+        method: "GET",
+        body: null,
+        contentType: null,
+        auth: "sekrit-value",
+      });
+    }
+  });
+
+  it("replays method and body on 307 and 308, and keeps HEAD on 303", async () => {
+    for (const status of [307, 308]) {
+      const { seen, fetchImpl } = recorder((_url, n) => (n === 1 ? redirect(status, "/done") : new Response("ok", { status: 200 })));
+      const check = http("submit", {
+        url: "https://example.com/submit",
+        method: "POST",
+        body: "payload",
+        headers: { "Content-Type": "text/plain" },
+        timeout: "5s",
+        interval: "1m",
+      });
+      await run(check, fetchImpl);
+      expect(seen[1]).toMatchObject({ method: "POST", body: "payload", contentType: "text/plain" });
+    }
+    const { seen, fetchImpl } = recorder((_url, n) => (n === 1 ? redirect(303, "/done") : new Response(null, { status: 200 })));
+    await run(http("head", { url: "https://example.com/x", method: "HEAD", timeout: "5s", interval: "1m" }), fetchImpl);
+    expect(seen.map((s) => s.method)).toEqual(["HEAD", "HEAD"]);
+  });
+
+  it("cancels the body of a redirect it follows", async () => {
+    let cancelled = 0;
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).endsWith("/start")) {
+        const stream = new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelled++;
+          },
+        });
+        return new Response(stream, { status: 302, headers: { Location: "/end" } });
+      }
+      return new Response("ok", { status: 200 });
+    };
+    const result = await run(http("c", { url: "https://example.com/start", timeout: "5s", interval: "1m" }), fetchImpl);
+    expect(result.outcome).toBe("pass");
+    expect(cancelled).toBe(1);
+  });
+});
+
 describe("status math", () => {
   it("uses majority quorum and critical banner", () => {
     expect(
@@ -263,6 +567,128 @@ describe("status math", () => {
     expect(confirmFlip(2, "fail", 3).confirmedFail).toBe(true);
     expect(heartbeatOutcome(Date.now() - 1000, Date.now(), 60_000, 5_000)).toBe("pass");
     expect(heartbeatOutcome(null, Date.now(), 60_000, 5_000)).toBe("fail");
+  });
+});
+
+describe("monitor state machine", () => {
+  const fresh: MonitorState = { confirmedOutcome: null, consecutiveFails: 0, consecutiveChanges: 0 };
+  const run = (state: MonitorState, outcomes: Array<"pass" | "degraded" | "fail">, confirmFails = 3) =>
+    outcomes.reduce<MonitorState & { settled: boolean }>(
+      (current, outcome) => advanceMonitor(current, outcome, confirmFails),
+      { ...state, settled: true },
+    );
+
+  it("confirms a failure after confirmFails consecutive failing runs", () => {
+    const passing = run(fresh, ["pass"]);
+    expect(passing).toMatchObject({ confirmedOutcome: "pass", settled: true });
+    expect(run(passing, ["fail", "fail"])).toMatchObject({ confirmedOutcome: "pass", consecutiveFails: 2, settled: false });
+    expect(run(passing, ["fail", "fail", "fail"])).toMatchObject({ confirmedOutcome: "fail", consecutiveFails: 3, settled: true });
+    expect(run(passing, ["fail", "fail", "pass", "fail"])).toMatchObject({ confirmedOutcome: "pass", consecutiveFails: 1 });
+    expect(run(passing, ["fail"], 1)).toMatchObject({ confirmedOutcome: "fail", settled: true });
+    expect(run(passing, ["fail"], 0)).toMatchObject({ confirmedOutcome: "fail" });
+  });
+
+  it("takes the first pass as is and stays unknown until a failure is confirmed", () => {
+    expect(run(fresh, ["pass"])).toMatchObject({ confirmedOutcome: "pass", settled: true });
+    expect(run(fresh, ["fail"])).toMatchObject({ confirmedOutcome: null, consecutiveFails: 1, settled: false });
+    expect(run(fresh, ["fail", "pass"])).toMatchObject({ confirmedOutcome: "pass", consecutiveFails: 0, settled: true });
+    expect(run(fresh, ["degraded"])).toMatchObject({ confirmedOutcome: null, settled: false });
+    expect(run(fresh, ["degraded", "degraded"])).toMatchObject({ confirmedOutcome: "degraded", settled: true });
+  });
+
+  it("ignores a single degraded run and a single recovered run", () => {
+    const passing = run(fresh, ["pass"]);
+    expect(run(passing, ["degraded"])).toMatchObject({ confirmedOutcome: "pass", consecutiveChanges: 1, settled: false });
+    expect(run(passing, ["degraded", "pass"])).toMatchObject({ confirmedOutcome: "pass", consecutiveChanges: 0, settled: true });
+    expect(run(passing, ["degraded", "pass", "degraded", "pass"])).toMatchObject({ confirmedOutcome: "pass" });
+    const degraded = run(passing, ["degraded", "degraded"]);
+    expect(degraded).toMatchObject({ confirmedOutcome: "degraded", settled: true });
+    expect(run(degraded, ["pass"])).toMatchObject({ confirmedOutcome: "degraded", settled: false });
+    expect(run(degraded, ["pass", "fail", "pass"])).toMatchObject({ confirmedOutcome: "degraded", consecutiveChanges: 1 });
+    expect(run(degraded, ["pass", "pass"])).toMatchObject({ confirmedOutcome: "pass", settled: true });
+  });
+
+  it("needs two non-failing runs to leave a confirmed failure", () => {
+    const failing = run(fresh, ["fail"], 1);
+    expect(run(failing, ["pass"], 1)).toMatchObject({ confirmedOutcome: "fail", consecutiveFails: 0, settled: false });
+    expect(run(failing, ["pass", "fail"], 1)).toMatchObject({ confirmedOutcome: "fail", consecutiveChanges: 0, settled: true });
+    expect(run(failing, ["pass", "pass"], 1)).toMatchObject({ confirmedOutcome: "pass", settled: true });
+    // A service that came back but is slow must not stay failing because its runs alternate.
+    expect(run(failing, ["pass", "degraded"], 1)).toMatchObject({ confirmedOutcome: "degraded", settled: true });
+    expect(run(failing, ["degraded", "pass"], 1)).toMatchObject({ confirmedOutcome: "pass", settled: true });
+  });
+
+  it("confirms degraded when runs alternate between failing and degraded", () => {
+    const passing = run(fresh, ["pass"]);
+    // One or two of three regions down: never three failing runs in a row, never a pass.
+    expect(run(passing, ["fail", "fail", "degraded"])).toMatchObject({ confirmedOutcome: "degraded", consecutiveChanges: 0, settled: true });
+    expect(run(passing, ["degraded", "fail", "degraded"])).toMatchObject({ confirmedOutcome: "degraded", settled: true });
+    expect(run(passing, ["fail", "degraded"])).toMatchObject({ confirmedOutcome: "degraded", settled: true });
+    expect(run(fresh, ["fail", "degraded"])).toMatchObject({ confirmedOutcome: "degraded", settled: true });
+    const degraded = run(passing, ["fail", "fail", "degraded", "fail", "fail", "degraded"]);
+    expect(degraded).toMatchObject({ confirmedOutcome: "degraded", consecutiveFails: 0, consecutiveChanges: 0, settled: true });
+    expect(run(degraded, ["fail", "fail", "fail"])).toMatchObject({ confirmedOutcome: "fail", settled: true });
+  });
+
+  it("does not report degraded on the way to a confirmed failure, or after a failing blip", () => {
+    const passing = run(fresh, ["pass"]);
+    expect(run(passing, ["fail", "fail"])).toMatchObject({ confirmedOutcome: "pass", consecutiveChanges: 2, settled: false });
+    expect(run(passing, ["fail", "fail", "pass"])).toMatchObject({ confirmedOutcome: "pass", consecutiveChanges: 0, settled: true });
+    expect(run(passing, ["fail", "pass", "degraded"])).toMatchObject({ confirmedOutcome: "pass", consecutiveChanges: 1, settled: false });
+    // A failing run is no step towards recovery for a check that is already degraded or failing.
+    const degraded = run(passing, ["degraded", "degraded"]);
+    expect(run(degraded, ["fail", "pass"])).toMatchObject({ confirmedOutcome: "degraded", consecutiveChanges: 1, settled: false });
+    const failing = run(passing, ["fail", "fail", "fail"]);
+    expect(run(failing, ["pass", "fail", "pass"])).toMatchObject({ confirmedOutcome: "fail", consecutiveChanges: 1, settled: false });
+  });
+
+  it("requires answers from half of the regions", () => {
+    expect(hasQuorum(0, 1)).toBe(false);
+    expect(hasQuorum(1, 1)).toBe(true);
+    expect(hasQuorum(1, 2)).toBe(true);
+    expect(hasQuorum(1, 3)).toBe(false);
+    expect(hasQuorum(2, 3)).toBe(true);
+    expect(hasQuorum(4, 9)).toBe(false);
+  });
+
+  it("looks at a passing heartbeat again right after its deadline", () => {
+    const now = 1_000_000;
+    expect(heartbeatRecheckMs(now - 50_000, now, 60_000, 5_000)).toBe(16_000);
+    expect(heartbeatRecheckMs(now, now, 60_000, 120_000)).toBe(60_000);
+    expect(heartbeatRecheckMs(now - 64_999, now, 60_000, 5_000)).toBe(1_001);
+    expect(heartbeatRecheckMs(now - 65_000, now, 60_000, 5_000)).toBe(1_000);
+  });
+});
+
+describe("component transitions", () => {
+  it("opens an incident and alerts once when a component starts failing", () => {
+    for (const prev of [null, "unknown", "operational", "degraded"]) {
+      expect(componentTransition(prev, "failing")).toEqual({ event: "fail", incident: "open", onlyIfResolved: false });
+    }
+    expect(componentTransition("failing", "failing")).toBeNull();
+  });
+
+  it("ends the outage when a failing component is only degraded", () => {
+    expect(componentTransition("failing", "degraded")).toEqual({ event: "degrade", incident: "resolve", onlyIfResolved: false });
+    expect(componentTransition("operational", "degraded")).toEqual({ event: "degrade", incident: null, onlyIfResolved: false });
+    for (const prev of [null, "unknown"]) {
+      expect(componentTransition(prev, "degraded")).toEqual({ event: "degrade", incident: "resolve", onlyIfResolved: false });
+    }
+    expect(componentTransition("degraded", "degraded")).toBeNull();
+  });
+
+  it("resolves on recovery, and closes a leftover incident without a known previous status", () => {
+    expect(componentTransition("failing", "operational")).toEqual({ event: "recover", incident: "resolve", onlyIfResolved: false });
+    expect(componentTransition("degraded", "operational")).toEqual({ event: "recover", incident: "resolve", onlyIfResolved: false });
+    expect(componentTransition("unknown", "operational")).toEqual({ event: "recover", incident: "resolve", onlyIfResolved: true });
+    expect(componentTransition(null, "operational")).toEqual({ event: "recover", incident: "resolve", onlyIfResolved: true });
+    expect(componentTransition("operational", "operational")).toBeNull();
+  });
+
+  it("never treats a missing verdict as a transition", () => {
+    expect(componentTransition("failing", "unknown")).toBeNull();
+    expect(componentTransition("operational", "unknown")).toBeNull();
+    expect(componentTransition(null, "maintenance")).toBeNull();
   });
 });
 

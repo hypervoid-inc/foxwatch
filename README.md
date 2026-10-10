@@ -44,6 +44,12 @@ Committed `wrangler.jsonc` in this template omits D1/KV IDs on purpose. Your acc
 
 Then open **`/admin`** on your Worker and create the first superadmin (email + password).
 
+Until that account exists, anyone who reaches `/admin` can create it, so do it right after the deploy finishes. To close that window, set a Worker secret named **`FOXWATCH_SETUP_TOKEN`** (dashboard **Settings → Variables and Secrets**, or the command below) before you open `/admin`. The setup screen then asks for the token and refuses to create the account without it. Leave it unset and setup works as before.
+
+```bash
+pnpm exec wrangler secret put FOXWATCH_SETUP_TOKEN
+```
+
 ### This repository (GitHub Actions)
 
 This repo deploys from **Actions on `main`**. Nothing is written into `wrangler.jsonc`.
@@ -125,7 +131,25 @@ All instance data is in **D1**: operator accounts, site name, HTTP and heartbeat
 pnpm exec wrangler secret put YOUR_SECRET_NAME
 ```
 
-Sensitive headers must use a secret ref. Secrets attach only when the request host is in `allowedHosts`; cross-origin redirects strip them.
+By default the admin UI only registers names; values are set with the command above. To set and rotate values from **Settings** instead, give the Worker these three secrets:
+
+| Name | Value |
+| --- | --- |
+| `FOXWATCH_CF_API_TOKEN` | API token with **Workers Scripts** write access on the account |
+| `FOXWATCH_CF_ACCOUNT_ID` | the account ID |
+| `FOXWATCH_CF_SCRIPT_NAME` | the Worker's name, `foxwatch` unless you renamed it |
+
+Values are never read back, in either mode.
+
+Sensitive headers must use a secret ref. Secrets attach only when the request host is in `allowedHosts`; cross-origin redirects strip them. Only names registered in admin resolve, and Foxwatch's own bindings (`FOXWATCH_CF_*`, `FOXWATCH_SETUP_TOKEN`, `ALLOW_HTTP_LOCAL`) never do. Registering a secret takes a superadmin, and so does any new use of one: other admins can save or test a request that carries a secret only when an existing check already sends that exact request (same URL, method, body, headers and allowed hosts). They can still edit everything else about such a check, and like any admin they see the response snippets of the requests it makes.
+
+**Operator accounts** - each operator changes their own password under **Settings → Your password**. That signs them out everywhere else, which is also how to cut off a leaked password or a session left on another machine. Sign-in allows 8 wrong passwords per account from one address (one IPv6 /48) in 15 minutes, and 3 once an account has drawn 200 wrong passwords from anywhere; no number of wrong guesses from elsewhere keeps the right password out. A trip shows in **Activity** as `login-throttled` by `anonymous`, a few per hour at most. Activity entries are kept for 365 days.
+
+If every operator is locked out, empty the accounts table and `/admin` offers first-account setup again (with the setup token, if you set one):
+
+```bash
+pnpm exec wrangler d1 execute foxwatch-data --remote --command "DELETE FROM ops_sessions; DELETE FROM ops_users;"
+```
 
 **Heartbeats** - create a check in admin, copy the token (or rotate it):
 
@@ -135,6 +159,16 @@ curl -X POST https://your-worker/api/heartbeat \
 ```
 
 Tokens never go in URLs.
+
+**Alert channels** - under **Settings**, add a Slack webhook, Discord webhook or generic webhook and pick the events it gets: fail, degrade, recover. The webhook URL is a Worker secret; the channel stores only its name. **Test** sends a sample alert. To preview the Discord card from your laptop without a deploy:
+
+```bash
+pnpm webhook -- --help
+```
+
+**Maintenance** - start or schedule a window on a component (up to 90 days; windows on one component cannot overlap). While it runs the public page shows the component as under maintenance.
+
+**Incidents** - a component that fails or degrades opens an incident on its own and resolves it on recovery. Operators can also open one by hand, attach components, and post updates (investigating, identified, monitoring, resolved). Each incident has a public page and appears in the RSS feed.
 
 **Status model**
 
@@ -148,10 +182,13 @@ Public JSON, HTML, RSS, and badges **do not** include check URLs, headers, or er
 
 ## Layout
 
-- `apps/worker` - Hono API, Durable Objects (Scheduler, Monitor, Probe)
-- `apps/web` - admin UI
+- `apps/worker` - Hono API, public status page, Durable Objects (Scheduler, Monitor, Probe, StatusHub)
+- `apps/web` - admin UI and the status page globe
 - `packages/config` - check shape helpers
 - `packages/engine` - URL policy, assertions, quorum, redaction
 - `migrations` - D1 schema
+- `scripts` - `pnpm foxwatch init`, `pnpm deploy`, `pnpm webhook`
+
+`pnpm test`, `pnpm check-types` and `pnpm build` are what CI runs.
 
 AGPL-3.0-or-later.

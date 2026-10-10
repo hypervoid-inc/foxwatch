@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api.ts";
 import { Activity } from "./Activity.tsx";
 import { Checks, type MonitorRow } from "./Checks.tsx";
-import { Incidents, type Incident } from "./Incidents.tsx";
+import { Incidents } from "./Incidents.tsx";
 import { bannerLabel, bannerMark } from "./labels.ts";
+import { loadVerdict, pollDelay } from "./poll.ts";
 import { fileFromDrop, isFileDrag } from "./prepare-icon.ts";
 import { Settings, type Me } from "./Settings.tsx";
 import { ErrorText, Field, FoxMark, Mark, Skeleton, ThemeToggle } from "./ui.tsx";
@@ -15,7 +16,6 @@ type Overview = {
     banner: string;
     stale: boolean;
     iconUrl?: string | null;
-    incidents: Incident[];
   };
   me: Me;
   monitors: MonitorRow[];
@@ -40,6 +40,8 @@ export function OpsApp() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [setupToken, setSetupToken] = useState("");
+  const [needsSetupToken, setNeedsSetupToken] = useState(false);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [secrets, setSecrets] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +49,17 @@ export function OpsApp() {
   const [pending, setPending] = useState(false);
   const [iconDrop, setIconDrop] = useState<File | null>(null);
   const [dropOver, setDropOver] = useState(false);
+  const [lost, setLost] = useState(false);
+  const [loads, setLoads] = useState(0);
+  // Read by load(), which also runs from timers that hold an older render's closure.
+  const gateRef = useRef<Gate>("loading");
+  const loadSeq = useRef(0);
+  const failures = useRef(0);
+
+  function enter(next: Gate) {
+    gateRef.current = next;
+    setGate(next);
+  }
 
   function go(next: Tab) {
     setTab(next);
@@ -55,27 +68,40 @@ export function OpsApp() {
   }
 
   async function load() {
-    const auth = await api<{ setup: boolean; me: Me | null }>("/api/ops/auth");
-    if (!auth.ok) {
-      setGate("login");
+    // Loads overlap (the poll, plus a refresh after a save). Only the newest one may update the screen.
+    const seq = ++loadSeq.current;
+    const auth = await api<{ setup: boolean; setupToken?: boolean; me: Me | null }>("/api/ops/auth");
+    if (seq !== loadSeq.current) return;
+    const signedIn = auth.ok && auth.data.me != null;
+    const res = signedIn ? await api<Overview>("/api/ops/overview") : null;
+    if (seq !== loadSeq.current) return;
+    const wasReady = gateRef.current === "ready";
+    const verdict = loadVerdict(auth, res);
+    if (verdict === "unreachable") {
+      failures.current += 1;
+      setLost(true);
+      // A signed-in operator keeps the screen and what they typed; the poll tries again.
+      if (wasReady) return;
+      enter("login");
       setError("Could not reach admin.");
       return;
     }
-    if (auth.data.me) {
-      const res = await api<Overview>("/api/ops/overview");
-      if (!res.ok) {
-        setGate("login");
-        setError("Could not reach admin.");
-        return;
-      }
+    if (failures.current > 0) setError(null);
+    failures.current = 0;
+    setLost(false);
+    if (verdict === "ready" && res?.ok) {
       setOverview(res.data);
       const s = await api<{ names: string[] }>("/api/ops/secrets");
+      if (seq !== loadSeq.current) return;
       if (s.ok) setSecrets(s.data.names);
-      setGate("ready");
+      setLoads((n) => n + 1);
+      enter("ready");
       return;
     }
     setOverview(null);
-    setGate(auth.data.setup ? "setup" : "login");
+    if (wasReady) setError("Your session ended. Sign in again.");
+    setNeedsSetupToken(auth.ok && auth.data.setupToken === true);
+    enter(auth.ok && auth.data.setup ? "setup" : "login");
   }
 
   useEffect(() => {
@@ -83,17 +109,28 @@ export function OpsApp() {
   }, []);
 
   useEffect(() => {
-    if (gate !== "ready") return;
-    const refresh = () => {
+    // Also runs after a failed first load, so a session that is still valid comes back by itself.
+    if (gate !== "ready" && !lost) return;
+    let timer = 0;
+    let stopped = false;
+    const schedule = () => {
+      timer = window.setTimeout(tick, pollDelay(failures.current));
+    };
+    const tick = async () => {
+      if (document.visibilityState === "visible") await load();
+      if (!stopped) schedule();
+    };
+    const onVisible = () => {
       if (document.visibilityState === "visible") void load();
     };
-    const timer = window.setInterval(refresh, 30_000);
-    document.addEventListener("visibilitychange", refresh);
+    schedule();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", refresh);
+      stopped = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [gate]);
+  }, [gate, lost]);
 
   useEffect(() => {
     function onPop() {
@@ -104,17 +141,20 @@ export function OpsApp() {
   }, []);
 
   useEffect(() => {
+    // Only Settings takes a dropped icon. Elsewhere a stray file is refused, so it can neither
+    // replace the public icon nor pull the operator away from a half-edited check.
+    const accepts = gate === "ready" && tab === "settings";
     let depth = 0;
     function onEnter(e: DragEvent) {
       if (!isFileDrag(e)) return;
       e.preventDefault();
       depth += 1;
-      setDropOver(true);
+      if (accepts) setDropOver(true);
     }
     function onOver(e: DragEvent) {
       if (!isFileDrag(e)) return;
       e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = gate === "ready" ? "copy" : "none";
+      if (e.dataTransfer) e.dataTransfer.dropEffect = accepts ? "copy" : "none";
     }
     function onLeave(e: DragEvent) {
       if (!isFileDrag(e)) return;
@@ -127,12 +167,9 @@ export function OpsApp() {
       e.preventDefault();
       depth = 0;
       setDropOver(false);
-      if (gate !== "ready") return;
+      if (!accepts) return;
       const file = fileFromDrop(e.dataTransfer);
-      if (!file) return;
-      setIconDrop(file);
-      setTab("settings");
-      if (window.location.pathname !== "/admin/settings") history.pushState(null, "", "/admin/settings");
+      if (file) setIconDrop(file);
     }
     window.addEventListener("dragenter", onEnter);
     window.addEventListener("dragover", onOver);
@@ -143,8 +180,9 @@ export function OpsApp() {
       window.removeEventListener("dragover", onOver);
       window.removeEventListener("dragleave", onLeave);
       window.removeEventListener("drop", onDrop);
+      setDropOver(false);
     };
-  }, [gate]);
+  }, [gate, tab]);
 
   useEffect(() => {
     if (gate === "ready" && overview) {
@@ -184,16 +222,18 @@ export function OpsApp() {
     setPending(true);
     const res = await api<{ ok: boolean }>("/api/ops/setup", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify(needsSetupToken ? { email, password, setupToken } : { email, password }),
     });
     setPending(false);
     if (!res.ok) {
       setError(res.error);
-      if (res.code === "exists" || res.status === 409) setGate("login");
+      if (res.code === "setup_token") setNeedsSetupToken(true);
+      if (res.code === "exists" || res.status === 409) enter("login");
       return;
     }
     setPassword("");
     setConfirm("");
+    setSetupToken("");
     await load();
   }
 
@@ -208,7 +248,7 @@ export function OpsApp() {
     setPending(false);
     if (!res.ok) {
       setError(res.error);
-      if (res.code === "setup") setGate("setup");
+      if (res.code === "setup") enter("setup");
       return;
     }
     setPassword("");
@@ -293,6 +333,19 @@ export function OpsApp() {
                     required
                   />
                 </Field>
+                {needsSetupToken ? (
+                  <Field label="Setup token" htmlFor="setup-token" hint="The FOXWATCH_SETUP_TOKEN secret set on this Worker.">
+                    <input
+                      id="setup-token"
+                      className="input"
+                      type="password"
+                      autoComplete="off"
+                      value={setupToken}
+                      onChange={(e) => setSetupToken(e.target.value)}
+                      required
+                    />
+                  </Field>
+                ) : null}
                 {error ? <ErrorText>{error}</ErrorText> : null}
                 <button className="btn btn-primary" disabled={pending} type="submit">
                   {pending ? "Creating…" : "Create superadmin"}
@@ -363,8 +416,12 @@ export function OpsApp() {
             className="btn btn-secondary btn-sm"
             type="button"
             onClick={() =>
-              void api("/api/ops/session", { method: "DELETE" }).then(() => {
-                setOverview(null);
+              void api("/api/ops/session", { method: "DELETE" }).then((res) => {
+                // Still signed in if the request never arrived; the refresh then says the connection is lost.
+                if (res.ok || res.status === 401) {
+                  setOverview(null);
+                  enter("loading");
+                }
                 void load();
               })
             }
@@ -373,6 +430,11 @@ export function OpsApp() {
           </button>
         </div>
       </header>
+      {lost ? (
+        <p className="stale-banner" role="status">
+          Connection lost. Showing the last loaded data and retrying.
+        </p>
+      ) : null}
       {overview.snapshot.stale ? (
         <p className="stale-banner" role="status">
           Monitoring data may be stale. The public page is showing the last known snapshot.
@@ -395,8 +457,8 @@ export function OpsApp() {
       {tab === "checks" ? <Checks monitors={overview.monitors} secrets={secrets} onChange={load} /> : null}
       {tab === "incidents" ? (
         <Incidents
-          incidents={overview.snapshot.incidents}
           components={[...new Map(overview.monitors.map((monitor) => [monitor.componentId ?? monitor.id, { id: monitor.componentId ?? monitor.id, name: monitor.componentName }])).values()]}
+          refreshKey={loads}
           onChange={load}
         />
       ) : null}

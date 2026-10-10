@@ -4,6 +4,8 @@ export const IDLE_MS = 1000;
 export const SPIN = 0.000062;
 export const SPIN_IN_MS = 1200;
 export const SPIN_OUT_MS = 420;
+/** Idle spin alone turns the globe well under a pixel a frame, so it is drawn at about 30 a second. */
+export const CRUISE_MS = 30;
 
 export type Orbit = {
   yaw: number;
@@ -15,6 +17,8 @@ export type Orbit = {
   spinT: number;
   moved: boolean;
   aimed: boolean;
+  aimedYou: boolean;
+  touched: boolean;
 };
 
 export function createOrbit(yaw = 0.35, pitch = 0.22): Orbit {
@@ -28,6 +32,8 @@ export function createOrbit(yaw = 0.35, pitch = 0.22): Orbit {
     spinT: 0,
     moved: false,
     aimed: false,
+    aimedYou: false,
+    touched: false,
   };
 }
 
@@ -36,6 +42,28 @@ export function aimOrbit(orbit: Orbit, lat: number, lng: number) {
   orbit.yaw = look.yaw;
   orbit.pitch = clampPitch(look.pitch);
   orbit.aimed = true;
+}
+
+/**
+ * Points the globe for a refresh: at the visitor the first time they are known,
+ * otherwise once at the middle of the regions. Where the visitor is can arrive
+ * after the regions were aimed at, so the two are tracked apart. A globe the
+ * visitor has already turned stays where they put it.
+ */
+export function aimScene(
+  orbit: Orbit,
+  you: { lat: number; lng: number } | null,
+  nodes: { lat: number; lng: number }[],
+): void {
+  if (you && !orbit.aimedYou) {
+    if (!orbit.touched) aimOrbit(orbit, you.lat, you.lng);
+    orbit.aimedYou = true;
+    orbit.aimed = true;
+  } else if (!orbit.aimed && nodes[0]) {
+    const lat0 = nodes.reduce((s, n) => s + n.lat, 0) / nodes.length;
+    const lng0 = nodes.reduce((s, n) => s + n.lng, 0) / nodes.length;
+    aimOrbit(orbit, lat0, lng0);
+  }
 }
 
 export function spinEase(t: number): number {
@@ -82,6 +110,20 @@ export function stepOrbit(orbit: Orbit, dt: number, reduce: boolean): boolean {
     moved = true;
   }
   return moved;
+}
+
+function gliding(orbit: Orbit): boolean {
+  return !orbit.dragging && Math.abs(orbit.vYaw) + Math.abs(orbit.vPitch) > 0.0004;
+}
+
+/** Whether the globe has anything left to animate. When it does not, the frame loop is stopped until something wakes it. */
+export function orbitActive(orbit: Orbit): boolean {
+  return orbit.dragging || orbit.spinning || orbit.spinT > 0 || gliding(orbit);
+}
+
+/** Whether idle spin is all that is turning the globe: a drag or a glide is drawn every frame, spin at CRUISE_MS. */
+export function spinOnly(orbit: Orbit): boolean {
+  return !orbit.dragging && !gliding(orbit);
 }
 
 export function bindOrbit(
@@ -155,7 +197,10 @@ export function bindOrbit(
     const dt = Math.max(8, (e.timeStamp || Date.now()) - lastT);
     const dx = e.clientX - lastX;
     const dy = e.clientY - lastY;
-    if (Math.abs(dx) + Math.abs(dy) > 3) orbit.moved = true;
+    if (Math.abs(dx) + Math.abs(dy) > 3) {
+      orbit.moved = true;
+      orbit.touched = true;
+    }
     const k = 1.15 / Math.max(80, opts.getRadius());
     const dyaw = dx * k;
     const dpitch = dy * k;

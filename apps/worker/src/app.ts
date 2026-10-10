@@ -9,6 +9,10 @@ import {
   MAX_TIMEOUT_MS,
   MAX_REGIONS,
   MAX_ASSERTIONS,
+  MAX_JSONPATH_LENGTH,
+  MAX_BODY_INCLUDES_LENGTH,
+  MAX_ASSERTION_VALUE_LENGTH,
+  parseJsonPath,
   REGIONS,
   ASSERTION_OPS,
   type Check,
@@ -17,38 +21,51 @@ import {
   http,
   heartbeat,
   secretName,
+  isReservedSecretName,
+  isBlockedHeader,
+  SECRET_NAME_RE,
 } from "@foxwatch/config";
-import { assertSafeUrl, runHttpProbe, sanitizeText, parseHomepageUrl } from "@foxwatch/engine";
+import { assertSafeUrl, runHttpProbe, sanitizeText, parseHomepageUrl, parsePublicUrl } from "@foxwatch/engine";
 import type { Env } from "./env.ts";
 import { allowHttpLocal, envSecret } from "./env.ts";
 import * as schema from "./db/schema.ts";
 import { authorizeOps, clearOpsCookie, csrfOk, isOpenOpsPath, opsCookie, sessionTokenFromRequest, type OpsRole } from "./auth/ops.ts";
-import { readSnapshot, publishSnapshot, loadSettings, saveSettings, rememberSecretNames, loadIcon, saveIcon, deleteIcon, loadPublicIncident } from "./lib/snapshot.ts";
-import { renderBadge, renderFeed, renderHistoryPage, renderIncidentPage, renderLivePayload, renderPublicHtml } from "./lib/public-html.ts";
+import { readSnapshot, publishSnapshot, loadSettings, updateSettings, rememberSecretNames, forgetSecretName, type SettingsPatch, loadIcon, saveIcon, deleteIcon, loadPublicIncident } from "./lib/snapshot.ts";
+import { globeAssetVersions, globeLandJson, publicInlineScripts, renderBadge, renderFeed, renderHistoryPage, LIVE_JSON_PATH, renderIncidentPage, renderLegacyLivePayload, renderLivePayload, renderPublicHtml } from "./lib/public-html.ts";
+import { GLOBE_CLIENT_SCRIPT } from "./lib/public-globe.ts";
 import { sha256Hex, randomToken, newId } from "./lib/crypto.ts";
 import { auditPageFromRows, parseAuditCursor, parseAuditLimit } from "./lib/audit-page.ts";
+import { loadOpsIncidents, parseIncidentLimit } from "./lib/ops-incidents.ts";
 import { monitorStub } from "./do/monitor.ts";
+import { schedulerStub } from "./do/scheduler.ts";
 import { sampleMonitors } from "./lib/samples.ts";
-import { deliverAlert, rememberPublicOrigin } from "./lib/alerts.ts";
+import { brandDiscordChannel, deliverAlert, rememberPublicOrigin } from "./lib/alerts.ts";
 import { loadSecretMap } from "./lib/secret-store.ts";
+import { isResolvableSecret, secretNamesFromCheck, secretRefError, type SecretRefError } from "./lib/secret-policy.ts";
 import { canManageWorkerSecrets, putWorkerSecret, WorkerSecretError } from "./lib/worker-secrets.ts";
 import {
+  changeOwnPassword,
   clientIp,
   createOperator,
+  isUniqueViolation,
   deleteOperator,
   listOperators,
   loginUser,
   needsSetup,
+  reserveThrottleAudit,
   revokeSession,
   setupFirstUser,
+  setupTokenRequired,
 } from "./auth/accounts.ts";
 import { fail, failFromUnknown } from "./lib/ops-error.ts";
 import { visitorFromRequest } from "./lib/visitor.ts";
 import { PUBLIC_INCIDENT_ID_RE } from "./lib/routes.ts";
 
+// No inline script is allowed by this policy as written. The pages' own inline
+// scripts are allowed one by one, by hash, in publicCsp() below.
 export const PUBLIC_HEADERS = {
   "content-security-policy":
-    "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
   "x-frame-options": "DENY",
@@ -58,12 +75,34 @@ export const PUBLIC_HEADERS = {
 
 const OPS_HEADERS = {
   "content-security-policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
   "x-frame-options": "DENY",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
   "cache-control": "no-store",
 };
+
+let publicCspValue: Promise<string> | undefined;
+
+/**
+ * The public policy with a hash for each inline script the pages carry (see
+ * publicInlineScripts). The scripts are fixed for a deploy, so this is worked
+ * out once. Text that an operator typed can therefore never run as script on
+ * this origin, which is also the origin of the admin UI, even if a template
+ * one day forgets to escape it.
+ */
+export function publicCsp(): Promise<string> {
+  publicCspValue ??= Promise.all(
+    publicInlineScripts().map(async (script) => {
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(script)));
+      let bin = "";
+      for (const b of digest) bin += String.fromCharCode(b);
+      return `'sha256-${btoa(bin)}'`;
+    }),
+  ).then((hashes) => PUBLIC_HEADERS["content-security-policy"].replace("script-src 'self'", `script-src 'self' ${hashes.join(" ")}`));
+  return publicCspValue;
+}
 
 export const app = new Hono<{ Bindings: Env; Variables: { actor: string; opsRole: OpsRole; opsUserId: string } }>();
 
@@ -73,51 +112,61 @@ app.onError((err, c) => {
 });
 
 app.use("*", async (c, next) => {
-  try {
-    const origin = new URL(c.req.url).origin;
-    const remember = rememberPublicOrigin(c.env, origin);
-    try {
-      c.executionCtx.waitUntil(remember);
-    } catch {
-      await remember;
-    }
-  } catch {
-    /* origin capture must never block a request */
-  }
   await next();
   if (c.req.path.startsWith("/admin") || c.req.path.startsWith("/ops") || c.req.path.startsWith("/api/ops")) {
     for (const [k, v] of Object.entries(OPS_HEADERS)) c.header(k, v);
   } else if (!c.req.path.startsWith("/assets")) {
+    const csp = await publicCsp();
     for (const [k, v] of Object.entries(PUBLIC_HEADERS)) {
-      if (k === "cache-control" && c.req.path === "/api/here.json") {
-        c.header(k, "private, no-store");
-      } else {
+      if (k === "content-security-policy") {
+        c.header(k, csp);
+      } else if (k !== "cache-control") {
         c.header(k, v);
+      } else if (!c.res.headers.has(k)) {
+        // A default only: /icon is immutable per version and /api/here.json is
+        // private. A server error is never worth replaying from a cache.
+        c.header(k, c.res.status >= 500 ? "no-store" : v);
       }
     }
   }
 });
 
+// The snapshot is read once per request. When the cache is empty the schedule
+// may never have run (first request after a deploy), so it is started here.
+function snapshotFor(c: { env: Env; executionCtx: Pick<ExecutionContext, "waitUntil"> }) {
+  return readSnapshot(c.env, () => {
+    try {
+      c.executionCtx.waitUntil(
+        schedulerStub(c.env)
+          .bootstrap()
+          .catch((err: unknown) => console.error("bootstrap failed", err)),
+      );
+    } catch {
+      /* no execution context or scheduler outside the Worker runtime */
+    }
+  });
+}
+
 app.get("/", async (c) => {
-  const snap = await readSnapshot(c.env);
-  return c.html(renderPublicHtml(snap), 200, PUBLIC_HEADERS);
+  const snap = await snapshotFor(c);
+  return c.html(renderPublicHtml(snap, new URL(c.req.url).origin), 200, PUBLIC_HEADERS);
 });
 
 app.get("/history", async (c) => {
-  const snap = await readSnapshot(c.env);
-  return c.html(renderHistoryPage(snap), 200, PUBLIC_HEADERS);
+  const snap = await snapshotFor(c);
+  return c.html(renderHistoryPage(snap, new URL(c.req.url).origin), 200, PUBLIC_HEADERS);
 });
 
 app.get("/incidents", (c) => c.redirect("/history", 302));
 
 app.get("/incidents/:id", async (c) => {
   const id = c.req.param("id");
-  const snap = await readSnapshot(c.env);
+  const snap = await snapshotFor(c);
   if (!PUBLIC_INCIDENT_ID_RE.test(id)) {
     return c.html(renderIncidentPage(snap, null), 404, PUBLIC_HEADERS);
   }
   const incident = await loadPublicIncident(c.env, id, snap);
-  return c.html(renderIncidentPage(snap, incident), incident ? 200 : 404, PUBLIC_HEADERS);
+  return c.html(renderIncidentPage(snap, incident, new URL(c.req.url).origin), incident ? 200 : 404, PUBLIC_HEADERS);
 });
 
 app.get("/api/here.json", (c) => {
@@ -125,25 +174,49 @@ app.get("/api/here.json", (c) => {
 });
 
 app.get("/api/status.json", async (c) => {
-  const snap = await readSnapshot(c.env);
+  const snap = await snapshotFor(c);
   c.header("access-control-allow-origin", "*");
   return c.json(snap);
 });
 
-app.get("/api/status/live.json", async (c) => {
-  const snap = await readSnapshot(c.env);
+app.get(LIVE_JSON_PATH, async (c) => {
+  const snap = await snapshotFor(c);
   return c.json(renderLivePayload(snap));
 });
 
+// Polled by pages that were open before the live blocks changed shape.
+app.get("/api/status/live.json", async (c) => {
+  const snap = await snapshotFor(c);
+  return c.json(renderLegacyLivePayload(snap));
+});
+
+// The globe's coastlines and canvas renderer. A wide-screen page fetches them
+// by content hash (see globeLoaderScript); a request for any other version is
+// answered with what this deploy has and is not cached under that address.
+function globeAsset(c: { req: { query: (name: string) => string | undefined } }, body: string, version: string, type: string): Response {
+  return new Response(body, {
+    headers: {
+      "content-type": type,
+      "cache-control": c.req.query("v") === version ? "public, max-age=31536000, immutable" : "no-store",
+    },
+  });
+}
+
+app.get("/api/globe/land.json", (c) =>
+  globeAsset(c, globeLandJson(), globeAssetVersions().land, "application/json; charset=utf-8"));
+
+app.get("/api/globe/2d.js", (c) =>
+  globeAsset(c, GLOBE_CLIENT_SCRIPT, globeAssetVersions().flat, "text/javascript; charset=utf-8"));
+
 app.get("/badge.svg", async (c) => {
-  const snap = await readSnapshot(c.env);
+  const snap = await snapshotFor(c);
   return new Response(renderBadge(snap), {
     headers: { "content-type": "image/svg+xml; charset=utf-8", ...PUBLIC_HEADERS },
   });
 });
 
 app.get("/feed.xml", async (c) => {
-  const snap = await readSnapshot(c.env);
+  const snap = await snapshotFor(c);
   return new Response(renderFeed(snap, new URL(c.req.url).origin), {
     headers: { "content-type": "application/rss+xml; charset=utf-8", ...PUBLIC_HEADERS },
   });
@@ -167,8 +240,8 @@ app.post("/api/heartbeat", async (c) => {
   const auth = c.req.header("Authorization");
   if (auth?.toLowerCase().startsWith("bearer ")) token = auth.slice(7).trim();
   if (!token && ct.includes("application/json")) {
-    const body = (await c.req.json().catch(() => null)) as { token?: string } | null;
-    token = body?.token?.trim() ?? "";
+    const body = await readJsonObject(c);
+    token = typeof body?.token === "string" ? body.token.trim() : "";
   }
   if (!token || token.length > 256) return c.body(null, 404);
   const hash = await sha256Hex(token);
@@ -179,6 +252,18 @@ app.post("/api/heartbeat", async (c) => {
   const now = Date.now();
   if (row.lastPingAt && now - row.lastPingAt < 1000) return c.body(null, 429);
   await db.update(schema.heartbeats).set({ lastPingAt: now }).where(eq(schema.heartbeats.monitorId, row.monitorId));
+  const monitor = (await db
+    .select({ confirmedOutcome: schema.monitors.confirmedOutcome, consecutiveFails: schema.monitors.consecutiveFails })
+    .from(schema.monitors)
+    .where(eq(schema.monitors.id, row.monitorId)))[0];
+  if (monitor && (monitor.confirmedOutcome !== "pass" || monitor.consecutiveFails > 0)) {
+    // A first ping, or one that ends a miss, is evaluated now rather than at the next poll.
+    try {
+      await monitorStub(c.env, row.monitorId).reschedule(1);
+    } catch {
+      /* the ping is stored; the scheduled run picks it up */
+    }
+  }
   return c.json({ ok: true });
 });
 
@@ -187,16 +272,20 @@ app.get("/api/ops/auth", async (c) => {
   const actor = await authorizeOps(c.req.raw, c.env);
   return c.json({
     setup,
+    // Tells the setup screen to ask for the token; says nothing once an account exists.
+    setupToken: setup && setupTokenRequired(c.env),
     me: actor ? { id: actor.userId, email: actor.actor, role: actor.role } : null,
   });
 });
 
 app.post("/api/ops/setup", async (c) => {
   if (!csrfOk(c.req.raw)) return fail(c, 403, "forbidden");
-  const body = (await c.req.json().catch(() => null)) as { email?: unknown; password?: unknown } | null;
-  const result = await setupFirstUser(c.env, body?.email, body?.password);
+  const body = (await c.req.json().catch(() => null)) as { email?: unknown; password?: unknown; setupToken?: unknown } | null;
+  const result = await setupFirstUser(c.env, body?.email, body?.password, body?.setupToken, clientIp(c.req.raw));
   if (!result.ok) {
     if (result.error === "exists") return fail(c, 409, "exists", "An account already exists. Sign in instead.");
+    if (result.error === "setup_token") return fail(c, 403, "setup_token");
+    if (result.error === "rate") return fail(c, 429, "rate");
     return fail(c, 400, result.error);
   }
   c.header("set-cookie", opsCookie(result.token, c.req.raw));
@@ -209,6 +298,11 @@ app.post("/api/ops/session", async (c) => {
   const body = (await c.req.json().catch(() => null)) as { email?: unknown; password?: unknown } | null;
   const result = await loginUser(c.env, body?.email, body?.password, clientIp(c.req.raw));
   if (!result.ok) {
+    // A crossed limit shows in Activity. The caller is signed out, so the actor
+    // is fixed, the email it tried stays in meta, and the rows are capped.
+    if (result.trip && (await reserveThrottleAudit(c.env, result.trip.scope))) {
+      await audit(c.env, "anonymous", "login-throttled", undefined, result.trip);
+    }
     if (result.error === "rate") return fail(c, 429, "rate");
     if (result.error === "setup") return fail(c, 409, "setup");
     return fail(c, 401, "credentials");
@@ -233,8 +327,22 @@ app.use("/api/ops/*", async (c, next) => {
   c.set("actor", actor.actor);
   c.set("opsRole", actor.role);
   c.set("opsUserId", actor.userId);
+  // The fallback origin for alert links is only ever taken from a signed-in
+  // operator's request, never from anonymous traffic.
+  const remember = rememberPublicOrigin(c.env, new URL(c.req.url).origin);
+  try {
+    c.executionCtx.waitUntil(remember);
+  } catch {
+    await remember;
+  }
   await next();
 });
+
+/** The JSON body when it is an object. Null for malformed JSON and for any other JSON value, so callers answer 400 instead of throwing. */
+async function readJsonObject(c: { req: { json: () => Promise<unknown> } }): Promise<Record<string, unknown> | null> {
+  const body = await c.req.json().catch(() => null);
+  return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+}
 
 function actorOf(c: { get: (k: "actor") => string }): string {
   return c.get("actor") ?? "unknown";
@@ -261,7 +369,7 @@ async function audit(env: Env, actor: string, action: string, monitorId?: string
 }
 
 app.get("/api/ops/overview", async (c) => {
-  const snap = await readSnapshot(c.env);
+  const snap = await snapshotFor(c);
   const db = drizzle(c.env.DB, { schema });
   const monitors = await db.select().from(schema.monitors);
   const latest = await db.select().from(schema.checkLatest);
@@ -289,13 +397,24 @@ app.get("/api/ops/overview", async (c) => {
   });
 });
 
+app.post("/api/ops/me/password", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { current?: unknown; password?: unknown } | null;
+  const result = await changeOwnPassword(c.env, opsActorOf(c), body?.current, body?.password, sessionTokenFromRequest(c.req.raw));
+  if (!result.ok) {
+    if (result.error === "rate") return fail(c, 429, "rate");
+    return fail(c, 400, result.error);
+  }
+  await audit(c.env, actorOf(c), "change-password");
+  return c.json({ ok: true });
+});
+
 app.get("/api/ops/users", async (c) => {
   if (opsActorOf(c).role !== "superadmin") return fail(c, 403, "forbidden");
   return c.json({ users: await listOperators(c.env) });
 });
 
 app.post("/api/ops/users", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as { email?: unknown; password?: unknown; role?: unknown };
+  const body = (await readJsonObject(c)) ?? {};
   const result = await createOperator(c.env, opsActorOf(c), body.email, body.password, body.role);
   if (!result.ok) {
     if (result.error === "forbidden") return fail(c, 403, "forbidden");
@@ -334,12 +453,8 @@ app.post("/api/ops/secrets", async (c) => {
   const body = (await c.req.json().catch(() => null)) as { name?: unknown; value?: unknown } | null;
   const name = typeof body?.name === "string" ? body.name.trim().toUpperCase() : "";
   const value = typeof body?.value === "string" ? body.value : "";
-  try {
-    secretName({ __foxwatch_secret__: name });
-    if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name)) throw new Error("name");
-  } catch {
-    return fail(c, 400, "secret");
-  }
+  if (!SECRET_NAME_RE.test(name)) return fail(c, 400, "secret");
+  if (isReservedSecretName(name)) return fail(c, 400, "secret_reserved");
   if (value) {
     if (new TextEncoder().encode(value).byteLength > 8192) return fail(c, 400, "secret_value");
     const rotating = Boolean(envSecret(c.env, name));
@@ -362,33 +477,48 @@ app.post("/api/ops/secrets", async (c) => {
 app.get("/api/ops/alert-channels", async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const rows = await db.select().from(schema.alertChannels);
+  const registered = (await loadSettings(c.env)).secrets;
   return c.json({
     channels: rows.map((row) => ({
       id: row.id,
       type: row.type,
       secretName: row.secretName,
       events: JSON.parse(row.eventsJson) as string[],
-      ready: Boolean(envSecret(c.env, row.secretName)),
+      ready: isResolvableSecret(row.secretName, registered) && Boolean(envSecret(c.env, row.secretName)),
     })),
   });
 });
 
 app.post("/api/ops/alert-channels", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const body = (await readJsonObject(c)) ?? {};
   const id = String(body.id ?? "");
   const type = body.type === "slack_webhook" || body.type === "discord_webhook" || body.type === "webhook" ? body.type : "";
   const secret = String(body.secretName ?? "").trim().toUpperCase();
   const events = Array.isArray(body.events)
     ? [...new Set(body.events.map(String).filter((event) => ["fail", "degrade", "recover"].includes(event)))]
     : [];
-  if (!ID_RE.test(id) || !type || !/^[A-Z][A-Z0-9_]{0,127}$/.test(secret) || events.length === 0) {
+  if (!ID_RE.test(id) || !type || !SECRET_NAME_RE.test(secret) || events.length === 0) {
     return fail(c, 400, "alert_channel");
   }
+  if (isReservedSecretName(secret)) return fail(c, 400, "secret_reserved");
+  // Registering a secret name is a superadmin action; others pick an existing one.
+  if (opsActorOf(c).role !== "superadmin" && !isResolvableSecret(secret, (await loadSettings(c.env)).secrets)) {
+    return fail(c, 403, "secret_unknown");
+  }
   const db = drizzle(c.env.DB, { schema });
-  await db.insert(schema.alertChannels).values({ id, type, secretName: secret, eventsJson: JSON.stringify(events) })
-    .onConflictDoUpdate({ target: schema.alertChannels.id, set: { type, secretName: secret, eventsJson: JSON.stringify(events) } });
+  const values = { id, type, secretName: secret, eventsJson: JSON.stringify(events) };
+  if (body.replace === true) {
+    await db.insert(schema.alertChannels).values(values)
+      .onConflictDoUpdate({ target: schema.alertChannels.id, set: { type, secretName: secret, eventsJson: values.eventsJson } });
+  } else {
+    // Adding must never take over a channel that is already delivering alerts.
+    const added = await db.insert(schema.alertChannels).values(values).onConflictDoNothing().returning({ id: schema.alertChannels.id });
+    if (added.length === 0) {
+      return fail(c, 409, "exists", "An alert channel with that name already exists. Pick another name, or remove that channel first.");
+    }
+  }
   await rememberSecretNames(c.env, [secret]);
-  await audit(c.env, actorOf(c), "upsert-alert-channel", undefined, { id, type, secretName: secret, events });
+  await audit(c.env, actorOf(c), body.replace === true ? "upsert-alert-channel" : "create-alert-channel", undefined, { id, type, secretName: secret, events });
   return c.json({ ok: true, id });
 });
 
@@ -407,7 +537,6 @@ app.post("/api/ops/alert-channels/:id/test", async (c) => {
   if (!channel) return fail(c, 404, "not_found");
   const origin = new URL(c.req.url).origin;
   try {
-    await rememberPublicOrigin(c.env, origin);
     const configured = JSON.parse(channel.eventsJson) as Array<"fail" | "degrade" | "recover">;
     await deliverAlert(c.env, { type: channel.type, secretName: channel.secretName, events: configured }, {
       eventId: newId(),
@@ -422,6 +551,13 @@ app.post("/api/ops/alert-channels/:id/test", async (c) => {
   } catch {
     return fail(c, 503, "delivery_failed");
   }
+  // The test has been delivered. Naming the Discord webhook must not hold up the answer.
+  const brand = brandDiscordChannel(c.env, channel);
+  try {
+    c.executionCtx.waitUntil(brand);
+  } catch {
+    /* no execution context outside the Worker runtime */
+  }
   await audit(c.env, actorOf(c), "test-alert-channel", undefined, { id });
   return c.json({ ok: true });
 });
@@ -430,8 +566,7 @@ app.delete("/api/ops/secrets/:name", async (c) => {
   if (opsActorOf(c).role !== "superadmin") return fail(c, 403, "forbidden");
   const name = c.req.param("name").toUpperCase();
   if (envSecret(c.env, name)) return fail(c, 409, "rotate_only");
-  const current = await loadSettings(c.env);
-  await saveSettings(c.env, { ...current, secrets: current.secrets.filter((n) => n !== name) });
+  await forgetSecretName(c.env, name);
   await audit(c.env, actorOf(c), "delete-secret", undefined, { name });
   return c.json({ ok: true });
 });
@@ -442,40 +577,49 @@ app.get("/api/ops/settings", async (c) => {
     siteName: settings.siteName,
     secrets: settings.secrets,
     homepageUrl: settings.homepageUrl ?? "",
+    publicUrl: settings.publicUrl ?? "",
     iconUrl: settings.iconUpdatedAt ? `/icon?v=${settings.iconUpdatedAt}` : null,
     globe: settings.globe,
   });
 });
 
 app.patch("/api/ops/settings", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as {
+  // The secret registry is not editable here: /api/ops/secrets owns it (superadmin only).
+  const body = ((await readJsonObject(c)) ?? {}) as {
     siteName?: unknown;
-    secrets?: unknown;
     homepageUrl?: unknown;
+    publicUrl?: unknown;
     globe?: unknown;
   };
-  const current = await loadSettings(c.env);
-  let homepageUrl = current.homepageUrl;
+  // Only the keys in the request are written, so a secret registered while this
+  // request is in flight is not overwritten with an older copy of the row.
+  const patch: SettingsPatch = {};
+  if (typeof body.siteName === "string") patch.siteName = body.siteName;
+  if (typeof body.globe === "boolean") patch.globe = body.globe;
   if ("homepageUrl" in body) {
     try {
-      homepageUrl = parseHomepageUrl(body.homepageUrl);
+      patch.homepageUrl = parseHomepageUrl(body.homepageUrl);
     } catch {
       return fail(c, 400, "invalid_url");
     }
   }
-  const next = await saveSettings(c.env, {
-    ...current,
-    siteName: typeof body.siteName === "string" ? body.siteName : current.siteName,
-    secrets: Array.isArray(body.secrets) ? body.secrets.map(String) : current.secrets,
-    homepageUrl,
-    globe: typeof body.globe === "boolean" ? body.globe : current.globe,
-  });
-  await audit(c.env, actorOf(c), "update-settings");
+  if ("publicUrl" in body) {
+    try {
+      patch.publicUrl = parsePublicUrl(body.publicUrl);
+    } catch {
+      return fail(c, 400, "invalid_url");
+    }
+  }
+  const current = await loadSettings(c.env);
+  const next = await updateSettings(c.env, patch);
+  const changed = (["siteName", "homepageUrl", "publicUrl", "globe"] as const).filter((key) => next[key] !== current[key]);
+  await audit(c.env, actorOf(c), "update-settings", undefined, { changed });
   await publishSnapshot(c.env);
   return c.json({
     siteName: next.siteName,
     secrets: next.secrets,
     homepageUrl: next.homepageUrl ?? "",
+    publicUrl: next.publicUrl ?? "",
     iconUrl: next.iconUpdatedAt ? `/icon?v=${next.iconUpdatedAt}` : null,
     globe: next.globe,
   });
@@ -554,7 +698,7 @@ app.get("/api/ops/monitors/:id/runs", async (c) => {
 });
 
 app.post("/api/ops/monitors/test-request", async (c) => {
-  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const body = await readJsonObject(c);
   if (!body) return fail(c, 400, "invalid");
   let check: Check;
   try {
@@ -563,6 +707,10 @@ app.post("/api/ops/monitors/test-request", async (c) => {
     return failFromUnknown(c, error);
   }
   if (check.type !== "http") return fail(c, 400, "invalid");
+  const refError = await secretRefErrorFor(c, check);
+  if (refError) return fail(c, 403, refError);
+  // A superadmin naming a new secret registers it, same as saving the check would.
+  if (opsActorOf(c).role === "superadmin") await rememberSecretNames(c.env, secretNamesFromCheck(check));
   const secrets = await loadSecretMap(c.env, secretNamesFromCheck(check));
   const result = await runHttpProbe(check, {
     secrets,
@@ -582,7 +730,7 @@ app.post("/api/ops/monitors/test-request", async (c) => {
 
 app.post("/api/ops/monitors/:id/mute", async (c) => {
   const id = c.req.param("id");
-  const body = (await c.req.json().catch(() => ({}))) as { until?: number | null };
+  const body = ((await readJsonObject(c)) ?? {}) as { until?: number | null };
   const db = drizzle(c.env.DB, { schema });
   const row = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
   if (!row) return fail(c, 404, "not_found");
@@ -607,7 +755,8 @@ app.post("/api/ops/heartbeats/:id/rotate", async (c) => {
   const now = Date.now();
   const existing = (await db.select().from(schema.heartbeats).where(eq(schema.heartbeats.monitorId, id)))[0];
   if (existing) {
-    await db.update(schema.heartbeats).set({ tokenHash, lastPingAt: null }).where(eq(schema.heartbeats.monitorId, id));
+    // The last ping stays: the job keeps its deadline while its token is swapped.
+    await db.update(schema.heartbeats).set({ tokenHash }).where(eq(schema.heartbeats.monitorId, id));
   } else {
     await db.insert(schema.heartbeats).values({ monitorId: id, tokenHash, lastPingAt: null, createdAt: now });
   }
@@ -619,7 +768,8 @@ app.post("/api/ops/monitors", async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const count = (await db.select().from(schema.monitors)).length;
   if (count >= MAX_MONITORS) return fail(c, 400, "quota");
-  const body = (await c.req.json()) as Record<string, unknown>;
+  const body = await readJsonObject(c);
+  if (!body) return fail(c, 400, "invalid");
   const id = String(body.id ?? "");
   if (!ID_RE.test(id)) return fail(c, 400, "invalid_id");
   const existing = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
@@ -631,6 +781,8 @@ app.post("/api/ops/monitors", async (c) => {
   } catch (err) {
     return failFromUnknown(c, err);
   }
+  const refError = await secretRefErrorFor(c, check);
+  if (refError) return fail(c, 403, refError);
   const now = Date.now();
   const groupName = sanitizeText(String(body.groupName ?? "Custom"), 80) || "Custom";
   const componentName = sanitizeText(String(body.componentName ?? body.name ?? id), 80) || id;
@@ -720,7 +872,8 @@ app.patch("/api/ops/monitors/:id", async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const row = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
   if (!row) return fail(c, 404, "not_found");
-  const body = (await c.req.json()) as Record<string, unknown>;
+  const body = await readJsonObject(c);
+  if (!body) return fail(c, 400, "invalid");
   const existingCheck = JSON.parse(row.configJson) as Check;
   let check: Check;
   try {
@@ -729,6 +882,8 @@ app.patch("/api/ops/monitors/:id", async (c) => {
   } catch (err) {
     return failFromUnknown(c, err);
   }
+  const refError = await secretRefErrorFor(c, check);
+  if (refError) return fail(c, 403, refError);
   const drifted = row.origin === "git" ? 1 : 0;
   const executionChanged = checkExecutionKey(check) !== checkExecutionKey(existingCheck);
   const nextGroupId = String(body.groupId ?? row.groupId);
@@ -748,6 +903,7 @@ app.patch("/api/ops/monitors/:id", async (c) => {
       drifted,
       consecutiveFails: executionChanged ? 0 : row.consecutiveFails,
       confirmedOutcome: executionChanged ? null : row.confirmedOutcome,
+      consecutiveChanges: executionChanged ? 0 : row.consecutiveChanges,
       updatedAt: Date.now(),
     })
     .where(eq(schema.monitors.id, id));
@@ -798,6 +954,12 @@ app.delete("/api/ops/monitors/:id", async (c) => {
     }
     await db.delete(schema.componentState).where(eq(schema.componentState.componentId, row.componentId));
   }
+  try {
+    const check = JSON.parse(row.configJson) as Check;
+    await monitorStub(c.env, id).destroy(check.type === "http" ? check.regions : []);
+  } catch {
+    /* its next alarm finds the row gone and clears itself */
+  }
   await audit(c.env, actorOf(c), "delete-monitor", id);
   await publishSnapshot(c.env);
   return c.json({ ok: true });
@@ -817,7 +979,7 @@ app.get("/api/ops/components/:id/maintenance", async (c) => {
 
 app.post("/api/ops/components/:id/maintenance", async (c) => {
   const id = c.req.param("id");
-  const body = (await c.req.json().catch(() => ({}))) as { note?: unknown; startAt?: unknown; endAt?: unknown };
+  const body = ((await readJsonObject(c)) ?? {}) as { note?: unknown; startAt?: unknown; endAt?: unknown };
   const db = drizzle(c.env.DB, { schema });
   const monitor = (await db.select().from(schema.monitors).where(eq(schema.monitors.componentId, id)))[0];
   if (!monitor) return fail(c, 404, "not_found");
@@ -877,8 +1039,15 @@ app.delete("/api/ops/components/:id/maintenance/:windowId", async (c) => {
   return c.json({ ok: true });
 });
 
+app.get("/api/ops/incidents", async (c) => {
+  const cursor = parseAuditCursor(c.req.query("cursor"));
+  if (cursor === "invalid") return fail(c, 400, "invalid_cursor");
+  return c.json(await loadOpsIncidents(c.env, { cursor, limit: parseIncidentLimit(c.req.query("limit")) }));
+});
+
 app.post("/api/ops/incidents", async (c) => {
-  const body = (await c.req.json()) as { title?: string; componentId?: string; componentIds?: unknown; impact?: string; body?: string; startedAt?: unknown; notify?: unknown };
+  const body = await readJsonObject(c);
+  if (!body) return fail(c, 400, "invalid");
   const id = newId();
   const now = Date.now();
   const createdAt = body.startedAt == null ? now : Number(body.startedAt);
@@ -886,11 +1055,12 @@ app.post("/api/ops/incidents", async (c) => {
     return fail(c, 400, "incident_time");
   }
   const db = drizzle(c.env.DB, { schema });
-  const title = sanitizeText(body.title ?? "", 200);
+  const title = sanitizeText(typeof body.title === "string" ? body.title : "", 200);
   if (!title) return fail(c, 400, "title");
+  const firstUpdate = sanitizeText(typeof body.body === "string" ? body.body : "Investigating.", 2000);
   const requested = Array.isArray(body.componentIds)
     ? [...new Set(body.componentIds.filter((id): id is string => typeof id === "string"))]
-    : body.componentId ? [body.componentId] : [];
+    : body.componentId ? [String(body.componentId)] : [];
   const known = new Set((await db.select({ id: schema.monitors.componentId }).from(schema.monitors)).map((row) => row.id));
   if (requested.some((id) => !known.has(id))) return fail(c, 400, "component");
   await db.insert(schema.incidents).values({
@@ -908,12 +1078,11 @@ app.post("/api/ops/incidents", async (c) => {
     id: newId(),
     incidentId: id,
     status: "investigating",
-    body: sanitizeText(body.body ?? "Investigating.", 2000),
+    body: firstUpdate,
     createdAt,
   });
   if (body.notify !== false) {
     const alertTargets = requested.length ? requested : ["global"];
-    const updateBody = sanitizeText(body.body ?? "Investigating.", 2000);
     try {
       await c.env.ALERTS.send({
         eventId: newId(),
@@ -927,7 +1096,7 @@ app.post("/api/ops/incidents", async (c) => {
         incidentId: id,
         incidentStatus: "investigating",
         incidentImpact: body.impact === "failing" ? "failing" : "degraded",
-        updateBody,
+        updateBody: firstUpdate,
       });
     } catch {
       /* incident publishing must not fail because an optional queue is absent */
@@ -940,27 +1109,32 @@ app.post("/api/ops/incidents", async (c) => {
 
 app.post("/api/ops/incidents/:id/updates", async (c) => {
   const id = c.req.param("id");
-  const body = (await c.req.json()) as { status?: string; body?: string; notify?: unknown };
+  const body = await readJsonObject(c);
+  if (!body) return fail(c, 400, "invalid");
   const db = drizzle(c.env.DB, { schema });
   const incident = (await db.select().from(schema.incidents).where(eq(schema.incidents.id, id)))[0];
   if (!incident) return fail(c, 404, "not_found");
   const now = Date.now();
-  const status = ["investigating", "identified", "monitoring", "resolved"].includes(String(body.status))
-    ? String(body.status)
-    : "monitoring";
-  const updateText = sanitizeText(body.body ?? "", 2000);
+  // An update without a status is a note: the incident stays where it is.
+  const status = body.status == null ? incident.status : String(body.status);
+  if (!["investigating", "identified", "monitoring", "resolved"].includes(status)) return fail(c, 400, "incident_status");
+  const updateText = sanitizeText(typeof body.body === "string" ? body.body : "", 2000);
   if (!updateText) return fail(c, 400, "update_body");
-  await db.insert(schema.incidentUpdates).values({
-    id: newId(),
-    incidentId: id,
-    status,
-    body: updateText,
-    createdAt: now,
-  });
-  await db
-    .update(schema.incidents)
-    .set({ status, resolvedAt: status === "resolved" ? now : null })
-    .where(eq(schema.incidents.id, id));
+  // Reopening puts the incident back on the public page, so it has to be asked for.
+  if (incident.resolvedAt != null && status !== "resolved" && body.reopen !== true) return fail(c, 409, "incident_resolved");
+  const resolvedAt = status === "resolved" ? incident.resolvedAt ?? now : null;
+  try {
+    // One batch, so an update is never left attached to an incident that did not change.
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO incident_updates (id, incident_id, status, body, created_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(newId(), id, status, updateText, now),
+      c.env.DB.prepare("UPDATE incidents SET status = ?, resolved_at = ? WHERE id = ?").bind(status, resolvedAt, id),
+    ]);
+  } catch (error) {
+    // Only one automatic incident may be open per component.
+    if (isUniqueViolation(error)) return fail(c, 409, "incident_open");
+    throw error;
+  }
   if (body.notify !== false) {
     const targets = (() => {
       try {
@@ -983,7 +1157,7 @@ app.post("/api/ops/incidents/:id/updates", async (c) => {
         incidentStatus: status,
         incidentImpact: incident.impact,
         updateBody: updateText,
-        durationMs: status === "resolved" ? Math.max(0, now - incident.createdAt) : undefined,
+        durationMs: resolvedAt != null ? Math.max(0, resolvedAt - incident.createdAt) : undefined,
       });
     } catch { /* optional queue */ }
   }
@@ -992,11 +1166,22 @@ app.post("/api/ops/incidents/:id/updates", async (c) => {
   return c.json({ ok: true });
 });
 
-function secretNamesFromCheck(check: Check): string[] {
-  if (check.type !== "http") return [];
-  return Object.values(check.headers ?? {})
-    .map((v) => secretName(v))
-    .filter((n): n is string => Boolean(n));
+/** Null when the caller may use every secret the check refers to. */
+async function secretRefErrorFor(
+  c: { env: Env; get: (k: "actor" | "opsRole" | "opsUserId") => string },
+  check: Check,
+): Promise<SecretRefError | null> {
+  const role = opsActorOf(c).role;
+  if (role === "superadmin" || secretNamesFromCheck(check).length === 0) return null;
+  const db = drizzle(c.env.DB, { schema });
+  const rows = await db.select({ configJson: schema.monitors.configJson }).from(schema.monitors).where(eq(schema.monitors.type, "http"));
+  const existing: Check[] = [];
+  for (const row of rows) {
+    try {
+      existing.push(JSON.parse(row.configJson) as Check);
+    } catch { /* unreadable rows vouch for nothing */ }
+  }
+  return secretRefError(check, { role, registered: (await loadSettings(c.env)).secrets, existing });
 }
 
 function checkExecutionKey(check: Check): string {
@@ -1005,11 +1190,10 @@ function checkExecutionKey(check: Check): string {
 }
 
 function listSecretNames(env: Env, fromConfig: string[]): string[] {
-  const reserved = new Set(["ALLOW_HTTP_LOCAL", "FOXWATCH_CF_API_TOKEN", "FOXWATCH_CF_ACCOUNT_ID", "FOXWATCH_CF_SCRIPT_NAME"]);
   const names = new Set(fromConfig);
   for (const [key, value] of Object.entries(env as unknown as Record<string, unknown>)) {
-    if (reserved.has(key) || typeof value !== "string") continue;
-    if (/^[A-Z][A-Z0-9_]{0,127}$/.test(key)) names.add(key);
+    if (isReservedSecretName(key) || typeof value !== "string") continue;
+    if (SECRET_NAME_RE.test(key)) names.add(key);
   }
   return [...names].sort();
 }
@@ -1053,8 +1237,11 @@ function parseCheckInput(body: Record<string, unknown>): Check {
   const headers = rawHeaders as Record<string, unknown>;
   for (const [name, value] of Object.entries(headers)) {
     if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(name)) throw new Error("headers");
+    if (isBlockedHeader(name)) throw new Error("header_blocked");
     const ref = secretName(value);
     if (typeof value !== "string" && !ref) throw new Error("headers");
+    if (ref && !SECRET_NAME_RE.test(ref)) throw new Error("secret_name");
+    if (ref && isReservedSecretName(ref)) throw new Error("secret_reserved");
     if (typeof value === "string" && value.length > 8192) throw new Error("headers");
     if (/authorization|proxy-authorization|api[-_]?key|token|secret|cookie/i.test(name) && typeof value === "string") {
       throw new Error("secret_required");
@@ -1066,20 +1253,23 @@ function parseCheckInput(body: Record<string, unknown>): Check {
   if (statuses.length < 1 || statuses.length > 20 || statuses.some((status) => !Number.isInteger(status) || Number(status) < 100 || Number(status) > 599)) {
     throw new Error("expect");
   }
-  if (expect.bodyIncludes != null && (typeof expect.bodyIncludes !== "string" || expect.bodyIncludes.length > 8192)) throw new Error("expect");
+  if (expect.bodyIncludes != null && (typeof expect.bodyIncludes !== "string" || expect.bodyIncludes.length > MAX_BODY_INCLUDES_LENGTH)) throw new Error("expect");
   if (expect.header != null && (typeof expect.header !== "object" || Array.isArray(expect.header) || Object.entries(expect.header as Record<string, unknown>).some(([name, value]) => !name || typeof value !== "string" || value.length > 8192))) {
     throw new Error("expect");
   }
   if (expect.jsonPath != null) {
     const assertion = expect.jsonPath as Record<string, unknown>;
-    if (!assertion || typeof assertion !== "object" || typeof assertion.path !== "string" || assertion.path.length > 256) throw new Error("expect");
+    if (!assertion || typeof assertion !== "object" || typeof assertion.path !== "string" || assertion.path.length > MAX_JSONPATH_LENGTH) throw new Error("expect");
+    parseJsonPath(assertion.path);
   }
   if (expect.assertions != null) {
     if (!Array.isArray(expect.assertions) || expect.assertions.length > MAX_ASSERTIONS) throw new Error("expect");
     for (const a of expect.assertions as unknown[]) {
       if (!a || typeof a !== "object" || Array.isArray(a)) throw new Error("expect");
       const item = a as Record<string, unknown>;
-      if (typeof item.path !== "string" || item.path.length > 256 || !item.path.startsWith("$")) throw new Error("expect");
+      if (typeof item.path !== "string" || item.path.length > MAX_JSONPATH_LENGTH) throw new Error("expect");
+      // Same parser the probe uses: a path that saves is a path that runs.
+      parseJsonPath(item.path);
       if (typeof item.op !== "string" || !(ASSERTION_OPS as readonly string[]).includes(item.op)) throw new Error("expect");
       const op = item.op as Assertion["op"];
       if (op === "exists" || op === "not_exists") {
@@ -1087,7 +1277,7 @@ function parseCheckInput(body: Record<string, unknown>): Check {
       } else if (op === "gt" || op === "gte" || op === "lt" || op === "lte") {
         if (typeof item.value !== "number" || !Number.isFinite(item.value)) throw new Error("expect");
       } else if (op === "contains" || op === "not_contains" || op === "matches") {
-        if (typeof item.value !== "string" || item.value.length > 256) throw new Error("expect");
+        if (typeof item.value !== "string" || item.value.length > MAX_ASSERTION_VALUE_LENGTH) throw new Error("expect");
       } else {
         // equals / not_equals: allow string, number, boolean, null
         if (item.value !== null && typeof item.value !== "string" && typeof item.value !== "number" && typeof item.value !== "boolean") throw new Error("expect");

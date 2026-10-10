@@ -100,6 +100,19 @@ const ISSUE_LABELS: Record<string, string> = {
   latency: "latency",
 };
 
+/** Why a delivery failed, and whether sending the same alert again can help. */
+export class AlertDeliveryError extends Error {
+  constructor(
+    readonly reason: string,
+    readonly retryable: boolean,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "AlertDeliveryError";
+  }
+}
+
 export function isPublicOrigin(origin: string): boolean {
   try {
     const url = new URL(origin);
@@ -109,12 +122,21 @@ export function isPublicOrigin(origin: string): boolean {
   }
 }
 
+// One KV read per isolate: a request on the origin already stored costs nothing.
+const rememberedOrigins = new WeakMap<object, string>();
+
+/**
+ * Stores the origin an operator is signed in on, as the fallback for alert links
+ * when no public URL is set. Callers must have authenticated the request:
+ * anyone can reach the Worker on its workers.dev host.
+ */
 export async function rememberPublicOrigin(env: Env, origin: string): Promise<void> {
   if (!isPublicOrigin(origin)) return;
   try {
+    if (rememberedOrigins.get(env.STATUS) === origin) return;
     const current = await env.STATUS.get(PUBLIC_ORIGIN_KEY);
-    if (current === origin) return;
-    await env.STATUS.put(PUBLIC_ORIGIN_KEY, origin);
+    if (current !== origin) await env.STATUS.put(PUBLIC_ORIGIN_KEY, origin);
+    rememberedOrigins.set(env.STATUS, origin);
   } catch {
     /* KV may be unbound in tests */
   }
@@ -127,6 +149,16 @@ export async function readPublicOrigin(env: Env): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Origin for the links in an alert: the public URL from settings, then the
+ * origin of the admin request that raised the alert, then the remembered one.
+ */
+export async function alertOrigin(env: Env, configured: string | null, requestOrigin?: string): Promise<string | null> {
+  if (configured && isPublicOrigin(configured)) return configured;
+  if (requestOrigin && isPublicOrigin(requestOrigin)) return requestOrigin;
+  return readPublicOrigin(env);
 }
 
 export function discordUsername(siteName: string): string {
@@ -179,7 +211,7 @@ export function regionLine(run: AlertRegion): string {
 
 export function discordPayload(body: AlertBody, ctx: DiscordPayloadContext): DiscordWebhookPayload {
   const names = displayNames(body);
-  const origin = resolveOrigin(body.publicOrigin ?? ctx.origin);
+  const origin = resolveOrigin(ctx.origin ?? body.publicOrigin);
   const title = embedTitle(body, names);
   let description = embedDescription(body);
   const fields = embedFields(body, names);
@@ -229,11 +261,11 @@ export async function deliverAlert(
 ): Promise<void> {
   if (!channel.events.includes(body.event)) return;
   const url = await resolveSecret(env, channel.secretName);
-  if (!url) throw new Error(`missing alert secret ${channel.secretName}`);
+  if (!url) throw new AlertDeliveryError("missing_secret", false, `missing alert secret ${channel.secretName}`);
   try {
     assertSafeUrl(url, { allowHttpLocal: false });
   } catch (error) {
-    throw new Error("unsafe alert endpoint", { cause: error });
+    throw new AlertDeliveryError("unsafe_endpoint", false, "unsafe alert endpoint", { cause: error });
   }
   const { channelId: _channelId, ...eventBody } = body;
   let payload: unknown;
@@ -245,7 +277,7 @@ export async function deliverAlert(
     payload = { text };
   } else if (channel.type === "discord_webhook") {
     const settings = await loadSiteBrand(env);
-    const origin = body.publicOrigin ?? await readPublicOrigin(env);
+    const origin = await alertOrigin(env, settings.publicUrl, body.publicOrigin);
     const enriched = await enrichAlertBody(env, body);
     const discord = discordPayload(enriched, {
       siteName: settings.siteName,
@@ -254,7 +286,6 @@ export async function deliverAlert(
     });
     executeUrl = discordExecuteUrl(url, Boolean(discord.components?.length));
     payload = discord;
-    await brandDiscordWebhook(url, env).catch(() => undefined);
   } else {
     payload = { source: "foxwatch", ...eventBody };
   }
@@ -270,17 +301,23 @@ export async function deliverAlert(
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       const snippet = text.replace(/\s+/g, " ").trim().slice(0, 180);
-      throw new Error(snippet ? `alert endpoint returned ${response.status}: ${snippet}` : `alert endpoint returned ${response.status}`);
+      // A rejected request stays rejected. Only a busy or broken endpoint is worth another try.
+      const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+      throw new AlertDeliveryError(
+        `http_${response.status}`,
+        retryable,
+        snippet ? `alert endpoint returned ${response.status}: ${snippet}` : `alert endpoint returned ${response.status}`,
+      );
     }
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function loadSiteBrand(env: Env): Promise<{ siteName: string; iconUrl: string | null }> {
+async function loadSiteBrand(env: Env): Promise<{ siteName: string; iconUrl: string | null; publicUrl: string | null }> {
   const { loadSettings, iconPublicUrl } = await import("./snapshot.ts");
   const settings = await loadSettings(env);
-  return { siteName: settings.siteName, iconUrl: iconPublicUrl(settings.iconUpdatedAt) };
+  return { siteName: settings.siteName, iconUrl: iconPublicUrl(settings.iconUpdatedAt), publicUrl: settings.publicUrl };
 }
 
 function clip(value: string, max: number): string {
@@ -353,6 +390,23 @@ function statusButton(origin: string | undefined, incidentId?: string): DiscordL
   };
 }
 
+/**
+ * Names the channel's webhook and sets its avatar. Every card already carries
+ * its own username and avatar, so this runs when a channel is tested, never on
+ * the delivery path. It does not throw.
+ */
+export async function brandDiscordChannel(env: Env, channel: { type: string; secretName: string }): Promise<void> {
+  if (channel.type !== "discord_webhook") return;
+  try {
+    const url = await resolveSecret(env, channel.secretName);
+    if (!url) return;
+    assertSafeUrl(url, { allowHttpLocal: false });
+    await brandDiscordWebhook(url, env);
+  } catch {
+    /* cosmetic only */
+  }
+}
+
 export async function brandDiscordWebhook(webhookUrl: string, env?: Env, png?: Uint8Array): Promise<void> {
   const avatar = pngAvatarDataUri(png) ?? await foxAvatarDataUri(env);
   const body: { name: string; avatar?: string } = { name: "Foxwatch" };
@@ -388,7 +442,7 @@ async function foxAvatarDataUri(env?: Env): Promise<string | null> {
     tries.push(() => env.ASSETS.fetch(new Request("https://foxwatch.internal/fox.png")));
   }
   for (const url of FOXWATCH_AVATAR_MIRRORS) {
-    tries.push(() => fetch(url));
+    tries.push(() => fetch(url, { signal: AbortSignal.timeout(5_000) }));
   }
   for (const get of tries) {
     try {

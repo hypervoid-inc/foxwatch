@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
+import { REGIONS } from "@foxwatch/config";
 import { fail, failFromUnknown, opsErrorBody } from "./ops-error.ts";
 
 describe("opsErrorBody", () => {
@@ -10,6 +11,11 @@ describe("opsErrorBody", () => {
     });
     expect(opsErrorBody("latency").error).toMatch(/below the timeout/);
     expect(opsErrorBody("delivery_failed").code).toBe("delivery_failed");
+  });
+
+  it("states the region limit the server enforces", () => {
+    expect(REGIONS.length).toBeGreaterThan(8);
+    expect(opsErrorBody("regions").error).toBe(`Choose from 1 to ${REGIONS.length} supported regions.`);
   });
 
   it("passes engine sentences through", () => {

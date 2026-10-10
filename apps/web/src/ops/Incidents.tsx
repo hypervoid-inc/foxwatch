@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api.ts";
+import { appendIncidents, incidentRefreshLimit, incidentsPath, incidentUpdatePayload, mergeRefreshedIncidents, type ResolvedList } from "./incident-list.ts";
 import { impactLabel, incidentStatusLabel } from "./labels.ts";
 import { ErrorText, Field, Mark, Timeline, useActionFlash } from "./ui.tsx";
 
@@ -37,15 +38,26 @@ function impactTone(impact: string): "bad" | "warn" {
   return impact === "failing" ? "bad" : "warn";
 }
 
+type IncidentPage = { open?: Incident[]; resolved: Incident[]; nextCursor: string | null };
+
 export function Incidents({
-  incidents,
   components,
+  refreshKey,
   onChange,
 }: {
-  incidents: Incident[];
   components: Array<{ id: string; name: string }>;
+  /** Changes whenever the admin overview reloads, so automatic incidents show up here too. */
+  refreshKey: number;
   onChange: () => Promise<void>;
 }) {
+  const [active, setActive] = useState<Incident[]>([]);
+  const [resolved, setResolved] = useState<Incident[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [listStatus, setListStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [more, setMore] = useState<"idle" | "loading" | "error">("idle");
+  const listSeq = useRef(0);
+  /** The resolved list as it stands, for a request that returns after another one changed it. */
+  const list = useRef<ResolvedList<Incident>>({ resolved: [], nextCursor: null });
   const [title, setTitle] = useState("");
   const [impact, setImpact] = useState<"degraded" | "failing">("degraded");
   const [body, setBody] = useState("Investigating.");
@@ -55,6 +67,55 @@ export function Incidents({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const { flash, flashOk } = useActionFlash();
+
+  function showResolved(next: ResolvedList<Incident>) {
+    list.current = next;
+    setResolved(next.resolved);
+    setNextCursor(next.nextCursor);
+  }
+
+  /**
+   * Reloads the list from the top. One request covers a limited number of resolved incidents,
+   * so older ones already on screen stay where they are.
+   */
+  async function refresh() {
+    const seq = ++listSeq.current;
+    const res = await api<IncidentPage>(incidentsPath({ limit: incidentRefreshLimit(list.current.resolved.length) }));
+    if (seq !== listSeq.current) return;
+    if (!res.ok) {
+      // A failed refresh keeps the list that is already showing.
+      setListStatus((current) => (current === "ready" ? current : "error"));
+      return;
+    }
+    const open = res.data.open ?? [];
+    setActive(open);
+    showResolved(mergeRefreshedIncidents(list.current, res.data, open.map((incident) => incident.id)));
+    setListStatus("ready");
+  }
+
+  // Not counted in listSeq: a background refresh must not cancel a "load older" request.
+  async function loadMore() {
+    const cursor = list.current.nextCursor;
+    if (!cursor || more === "loading") return;
+    setMore("loading");
+    const res = await api<IncidentPage>(incidentsPath({ cursor }));
+    if (!res.ok) {
+      setMore("error");
+      return;
+    }
+    setMore("idle");
+    // A refresh that replaced the list in the meantime moved the cursor; this page no longer continues from it.
+    if (list.current.nextCursor !== cursor) return;
+    showResolved({ resolved: appendIncidents(list.current.resolved, res.data.resolved), nextCursor: res.data.nextCursor });
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, [refreshKey]);
+
+  async function changed() {
+    await Promise.all([refresh(), onChange()]);
+  }
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -74,11 +135,8 @@ export function Incidents({
     setComponentIds([]);
     setStartedAt("");
     flashOk();
-    await onChange();
+    await changed();
   }
-
-  const active = incidents.filter((i) => i.status !== "resolved");
-  const resolved = incidents.filter((i) => i.status === "resolved");
 
   return (
     <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -110,7 +168,7 @@ export function Incidents({
                     </p>
                   ) : null}
                   <Timeline updates={i.updates} />
-                  <IncidentUpdate id={i.id} onChange={onChange} onError={setError} />
+                  <IncidentUpdate id={i.id} status={i.status} onChange={changed} />
                 </li>
               ))}
             </ul>
@@ -122,9 +180,17 @@ export function Incidents({
           <div className="px-4 py-3">
             <h2 className="section-title">{active.length > 0 ? "Resolved" : "Incident history"}</h2>
             <p className="section-copy">Past incidents visible on the public page.</p>
-            {error ? <div className="mt-2"><ErrorText>{error}</ErrorText></div> : null}
           </div>
-          {resolved.length === 0 && active.length === 0 ? (
+          {listStatus === "loading" ? (
+            <p className="empty-note">Loading…</p>
+          ) : listStatus === "error" ? (
+            <div className="border-t border-line px-4 py-8">
+              <ErrorText>Could not load incidents.</ErrorText>
+              <button className="btn btn-secondary btn-sm mt-2" type="button" onClick={() => void refresh()}>
+                Retry
+              </button>
+            </div>
+          ) : resolved.length === 0 && active.length === 0 ? (
             <div className="empty-note">
               <svg className="mx-auto mb-2 size-8 text-muted opacity-50" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M9 12l2 2 4-4"/></svg>
               No incidents reported. All systems operational.
@@ -152,6 +218,14 @@ export function Incidents({
               ))}
             </ul>
           )}
+          {listStatus === "ready" && nextCursor ? (
+            <div className="border-t border-line px-4 py-3">
+              {more === "error" ? <ErrorText>Could not load older incidents.</ErrorText> : null}
+              <button className={`btn btn-secondary btn-sm${more === "error" ? " mt-2" : ""}`} type="button" disabled={more === "loading"} onClick={() => void loadMore()}>
+                {more === "loading" ? "Loading…" : more === "error" ? "Retry" : "Load older incidents"}
+              </button>
+            </div>
+          ) : null}
         </div>
       </section>
 
@@ -211,42 +285,57 @@ function formatDuration(ms: number): string {
 
 function IncidentUpdate({
   id,
+  status: current,
   onChange,
-  onError,
 }: {
   id: string;
+  /** The incident's status now. A message posted without touching the select must not change it. */
+  status: string;
   onChange: () => Promise<void>;
-  onError: (message: string) => void;
 }) {
-  const [status, setStatus] = useState("monitoring");
+  const [status, setStatus] = useState(current);
+  // Only a status the operator picked is sent; the one shown until then may be out of date.
+  const [picked, setPicked] = useState(false);
   const [body, setBody] = useState("");
   const [notify, setNotify] = useState(true);
   const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Follows the incident when it moves on, here or from another operator, until the operator picks a status.
+  useEffect(() => {
+    if (!picked) setStatus(current);
+  }, [current, picked]);
+
   return (
     <form
       className="incident-update-form"
       onSubmit={async (e) => {
         e.preventDefault();
-        if (!body.trim()) return;
+        setError(null);
+        if (!body.trim()) {
+          setError("Add a public incident update message.");
+          return;
+        }
         setPending(true);
-        const res = await api(`/api/ops/incidents/${id}/updates`, { method: "POST", body: JSON.stringify({ status, body, notify }) });
+        const res = await api(`/api/ops/incidents/${id}/updates`, { method: "POST", body: JSON.stringify(incidentUpdatePayload({ status: picked ? status : null, body, notify })) });
         setPending(false);
         if (!res.ok) {
-          onError(res.error);
+          setError(res.error);
           return;
         }
         setBody("");
+        setPicked(false);
         await onChange();
       }}
     >
       <div className="incident-update-row">
-        <select className="input incident-update-select" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Incident status">
+        <select className="input incident-update-select" value={status} onChange={(e) => { setStatus(e.target.value); setPicked(true); }} aria-label="Incident status">
           <option value="investigating">Investigating</option>
           <option value="identified">Identified</option>
           <option value="monitoring">Monitoring</option>
           <option value="resolved">Resolved</option>
         </select>
-        <input className="input incident-update-input" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Post a public update…" />
+        <input className="input incident-update-input" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Post a public update…" aria-label="Public update" required />
       </div>
       <div className="incident-update-actions">
         <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted"><input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />Alert</label>
@@ -254,6 +343,7 @@ function IncidentUpdate({
           {pending ? "Posting…" : "Post update"}
         </button>
       </div>
+      {error ? <ErrorText>{error}</ErrorText> : null}
     </form>
   );
 }
