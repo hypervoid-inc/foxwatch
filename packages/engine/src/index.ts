@@ -5,7 +5,7 @@ export {
   parseHomepageUrl,
   parsePublicUrl,
 } from "./url-policy.ts";
-export { redactText, stripForbiddenHeaders, resolveHeaders, shouldAttachSecrets } from "./secrets.ts";
+export { redactText, secretVariants, stripForbiddenHeaders, resolveHeaders, shouldAttachSecrets } from "./secrets.ts";
 export { evaluateHttp, type HttpEvalInput, type HttpEvalResult } from "./http-assert.ts";
 export { heartbeatOutcome, heartbeatRecheckMs } from "./heartbeat.ts";
 export {

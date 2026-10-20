@@ -35,6 +35,7 @@ import {
   redactText,
   resolveHeaders,
   runHttpProbe,
+  secretVariants,
   stripForbiddenHeaders,
   UrlPolicyError,
   DEFAULT_PROBE_USER_AGENT,
@@ -159,8 +160,9 @@ describe("secrets", () => {
       "CF-Connecting-IP": "1.1.1.1",
       "X-Forwarded-For": "1.1.1.1",
       Authorization: "Bearer x",
+      "cf-aig-skip-cache": "true",
     });
-    expect(out).toEqual({ Authorization: "Bearer x" });
+    expect(out).toEqual({ Authorization: "Bearer x", "cf-aig-skip-cache": "true" });
   });
 
   it("sends a secret-backed Cookie to allowed hosts only", () => {
@@ -170,6 +172,26 @@ describe("secrets", () => {
     expect(resolveHeaders(headers, env, "evil.example.com", ["app.example.com"]).headers).toEqual({});
     // A literal cookie never follows a redirect off the allowlist either.
     expect(resolveHeaders({ Cookie: "sid=abc" }, {}, "evil.example.com", ["app.example.com"]).headers).toEqual({});
+  });
+
+  it("keeps a literal cf-aig-authorization off hosts outside the allowlist", () => {
+    const headers = { "cf-aig-authorization": "Bearer gw", "cf-aig-metadata": "{}" };
+    expect(resolveHeaders(headers, {}, "evil.example.com", ["infer.example.com"]).headers).toEqual({ "cf-aig-metadata": "{}" });
+  });
+
+  it("redacts a secret echoed without its auth scheme or encoded", () => {
+    const extra = secretVariants(["Bearer fwk_live_AbCdEfGhIjKlMnOp1234", "Basic " + btoa("bob:pa55word/9")]);
+    for (const body of [
+      '{"error":"invalid token fwk_live_AbCdEfGhIjKlMnOp1234"}',
+      "Unauthorized: key fwk_live_AbCdEfGhIjKlMnOp1234 is revoked",
+      "user bob:pa55word/9 rejected",
+      "password pa55word%2F9 wrong",
+    ]) {
+      const out = redactText(body, extra);
+      expect(out).not.toContain("fwk_live_AbCdEfGhIjKlMnOp1234");
+      expect(out).not.toContain("pa55word");
+      expect(out).toContain("[redacted]");
+    }
   });
 
   it("redacts tokens from snippets", () => {
@@ -416,6 +438,28 @@ describe("runHttpProbe redirects", () => {
     expect(seen).toHaveLength(1);
     expect(result.errorClass).toBe("redirect_host");
     expect(result.errorSnippet ?? "").not.toContain("sekrit-value");
+  });
+
+  it("redacts a bare token the target echoes back from a Bearer secret", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response('{"error":{"message":"Invalid key sk-live-9f8a7b6c5d4e"}}', { status: 401 });
+    const check = http("inference-gateway", {
+      url: "https://infer.example.com/compat/chat/completions",
+      allowedHosts: ["infer.example.com"],
+      headers: { Authorization: secret("INFER_KEY"), "cf-aig-skip-cache": "true" },
+      timeout: "5s",
+      interval: "1m",
+    });
+    const result = await runHttpProbe(check, {
+      secrets: { INFER_KEY: "Bearer sk-live-9f8a7b6c5d4e" },
+      allowHttpLocal: false,
+      fetchImpl,
+      colo: "SFO",
+    });
+    expect(result.outcome).toBe("fail");
+    expect(result.errorSnippet).toContain("[redacted]");
+    expect(result.errorSnippet).not.toContain("sk-live-9f8a7b6c5d4e");
+    expect(result.responseSnippet).not.toContain("sk-live-9f8a7b6c5d4e");
   });
 });
 

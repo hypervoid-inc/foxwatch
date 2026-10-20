@@ -254,6 +254,14 @@ export function discordPayload(body: AlertBody, ctx: DiscordPayloadContext): Dis
   return payload;
 }
 
+/** Generic webhook body; snippets get the same redaction pass as Discord's. */
+export function webhookPayload(body: Omit<AlertBody, "channelId">): Record<string, unknown> {
+  const regions = body.regions?.map((run) =>
+    run.errorSnippet ? { ...run, errorSnippet: redactText(run.errorSnippet) } : run,
+  );
+  return { source: "foxwatch", ...body, ...(regions ? { regions } : {}) };
+}
+
 export async function deliverAlert(
   env: Env,
   channel: { type: string; secretName: string; events: string[] },
@@ -287,7 +295,7 @@ export async function deliverAlert(
     executeUrl = discordExecuteUrl(url, Boolean(discord.components?.length));
     payload = discord;
   } else {
-    payload = { source: "foxwatch", ...eventBody };
+    payload = webhookPayload(eventBody);
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);

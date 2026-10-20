@@ -20,7 +20,7 @@ const MESSAGES: Record<string, string> = {
   exists: "That already exists.",
   expect: "Check the response assertions and expected status codes.",
   forbidden: "You do not have permission to do that.",
-  header_blocked: "Host, Connection, Proxy-Authorization, Set-Cookie, CF-* and X-Forwarded-* headers are set by the network and cannot be sent. Remove them.",
+  header_blocked: "Host, Connection, Proxy-Authorization, Set-Cookie, CF-* (except AI Gateway's CF-AIG-*) and X-Forwarded-* headers are set by the network and cannot be sent. Remove them.",
   headers: "Check the header names and keep values under 8 KB.",
   https_required: "Use HTTPS. Plain HTTP is only enabled for localhost in local development.",
   icon: "Could not save that icon.",

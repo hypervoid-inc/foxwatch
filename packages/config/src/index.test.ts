@@ -377,6 +377,19 @@ describe("header and secret name validation", () => {
     }
   });
 
+  it("accepts AI Gateway cf-aig-* headers but still rejects other CF-* headers", () => {
+    expect(() =>
+      withHeaders({ "cf-aig-metadata": '{"use":"probe"}', "CF-AIG-Skip-Cache": "true" }),
+    ).not.toThrow();
+    expect(() => withHeaders({ "cf-ray": "abc" })).toThrow(/cannot be sent/);
+    expect(() => withHeaders({ "cf-aigx": "abc" })).toThrow(/cannot be sent/);
+  });
+
+  it("requires a secret ref for cf-aig-authorization", () => {
+    expect(() => withHeaders({ "cf-aig-authorization": "Bearer gw-token" })).toThrow(/must use secret\(\)/);
+    expect(() => withHeaders({ "cf-aig-authorization": secret("SESSION_COOKIE") })).not.toThrow();
+  });
+
   it("rejects reserved secret names", () => {
     expect(() => secret("FOXWATCH_CF_API_TOKEN")).toThrow(/reserved/);
     expect(() => secret("ALLOW_HTTP_LOCAL")).toThrow(/reserved/);

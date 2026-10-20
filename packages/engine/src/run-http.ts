@@ -1,7 +1,7 @@
 import type { HttpCheck, RunOutcome, SecretRef } from "@foxwatch/config";
 import { BODY_READ_LIMIT } from "@foxwatch/config";
 import { evaluateHttp } from "./http-assert.ts";
-import { redactText, resolveHeaders } from "./secrets.ts";
+import { redactText, resolveHeaders, secretVariants } from "./secrets.ts";
 import { assertSafeUrl, UrlPolicyError } from "./url-policy.ts";
 
 export type ProbeResult = {
@@ -113,11 +113,11 @@ export async function runHttpProbe(
     .filter(([name, value]) => sensitiveHeader.test(name) && typeof value === "string")
     .map(([, value]) => value as string);
   const querySecrets = [...url.searchParams.values()].filter((value) => value.length >= 4);
-  const secretValues = [
+  const secretValues = secretVariants([
     ...Object.values(opts.secrets).filter((v): v is string => Boolean(v)),
     ...literalHeaderSecrets,
     ...querySecrets,
-  ];
+  ]);
   let current = url;
   let headersForHop = resolveHeaders(check.headers as Record<string, string | SecretRef>, opts.secrets, current.hostname, check.allowedHosts);
   if (headersForHop.missingSecret) {

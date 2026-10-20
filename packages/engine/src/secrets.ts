@@ -1,7 +1,7 @@
 import { isBlockedHeader, isSecretRef, secretName, SNIPPET_LIMIT, type SecretRef } from "@foxwatch/config";
 import { assertSafeUrl } from "./url-policy.ts";
 
-const SENSITIVE = /^(authorization|proxy-authorization|cookie|x-api-key|api-key|x-auth-token)$/i;
+const SENSITIVE = /^(authorization|proxy-authorization|cf-aig-authorization|cookie|x-api-key|api-key|x-auth-token)$/i;
 
 export function stripForbiddenHeaders(headers: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
@@ -61,6 +61,41 @@ const REDACT_HEADER_LINE = new RegExp(`^([ \\t]*[\\w.-]{0,64}?${REDACT_KEY}[\\w.
 const REDACT_SCHEME = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 const REDACT_JWT = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]*)?/g;
 const REDACT_HEX = /\b[A-Fa-f0-9]{32,}\b/g;
+
+const AUTH_SCHEME = /^(?:Bearer|Basic|Token|Bot)\s+/i;
+
+/**
+ * Every form a secret can come back in: whole, without its auth scheme (a
+ * target that says "invalid key sk-..." echoes only the token), Basic decoded
+ * to user:pass and the password alone, and JSON-escaped and URL-encoded.
+ * Longest first so a shorter form never splits a longer one before it is cut.
+ */
+export function secretVariants(values: string[]): string[] {
+  const out = new Set<string>();
+  const add = (value: string) => {
+    if (value.length < 4) return;
+    out.add(value);
+    out.add(JSON.stringify(value).slice(1, -1));
+    out.add(encodeURIComponent(value));
+  };
+  for (const raw of values) {
+    const value = raw.trim();
+    add(value);
+    const bare = value.replace(AUTH_SCHEME, "");
+    if (bare === value) continue;
+    add(bare);
+    if (!/^basic\s/i.test(value)) continue;
+    try {
+      const decoded = atob(bare);
+      add(decoded);
+      const colon = decoded.indexOf(":");
+      if (colon >= 0) add(decoded.slice(colon + 1));
+    } catch {
+      // Not base64: the bare form above already covers it.
+    }
+  }
+  return [...out].sort((a, b) => b.length - a.length);
+}
 
 export function redactText(input: string, extra: string[] = []): string {
   let out = input;

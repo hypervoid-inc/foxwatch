@@ -14,6 +14,7 @@ import {
   pngAvatarDataUri,
   rememberPublicOrigin,
   regionLine,
+  webhookPayload,
   type AlertBody,
   type DiscordPayloadContext,
 } from "./alerts.ts";
@@ -149,6 +150,14 @@ describe("discordPayload", () => {
     expect(payload.embeds[0]!.description).toContain("```");
     expect(payload.embeds[0]!.description).toContain("[redacted]");
     expect(payload.embeds[0]!.description).not.toContain("Bearer secret-token");
+  });
+
+  it("redacts snippets in the generic webhook body", () => {
+    const payload = webhookPayload(base({
+      regions: [{ region: "wnam", outcome: "fail", errorClass: "status", errorSnippet: "Authorization: Bearer secret-token" }],
+    }));
+    expect(JSON.stringify(payload)).not.toContain("secret-token");
+    expect(JSON.stringify(payload)).toContain("[redacted]");
   });
 
   it("truncates oversized titles and field values", () => {

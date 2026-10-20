@@ -87,11 +87,17 @@ const BLOCKED_HEADERS = new Set([
 
 /**
  * Request headers the probe never sends: hop-by-hop, response-only, and the
- * ones Cloudflare sets itself. Cookie is allowed, as a secret ref.
+ * ones Cloudflare sets itself. Cookie is allowed, as a secret ref. AI Gateway's
+ * `cf-aig-*` request headers (metadata, skip cache) are the client's to send,
+ * so a probe of a gateway can tag itself.
  */
 export function isBlockedHeader(name: string): boolean {
   const lower = name.toLowerCase();
-  return BLOCKED_HEADERS.has(lower) || lower.startsWith("cf-") || lower.startsWith("x-forwarded");
+  return (
+    BLOCKED_HEADERS.has(lower) ||
+    (lower.startsWith("cf-") && !lower.startsWith("cf-aig-")) ||
+    lower.startsWith("x-forwarded")
+  );
 }
 
 export const ASSERTION_OPS = [
