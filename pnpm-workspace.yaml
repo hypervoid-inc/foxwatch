@@ -11,3 +11,5 @@ allowBuilds:
   workerd: true
   "@vgpu/adapter-node": true
   webgpu: true
+  # agents brings it for the MCP server; its script only prints a funding banner.
+  core-js-pure: false
