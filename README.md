@@ -170,6 +170,14 @@ pnpm webhook -- --help
 
 **Incidents** - a component that fails or degrades opens an incident on its own and resolves it on recovery. Operators can also open one by hand, attach components, and post updates (investigating, identified, monitoring, resolved). Each incident has a public page and appears in the RSS feed.
 
+**Connect an agent** - Foxwatch serves an MCP server at `/api/ops/mcp`, so an agent can read and manage checks, incidents and maintenance. Create a token under **Settings → API tokens** (it is shown once), then add the server to Claude Code:
+
+```bash
+claude mcp add --transport http foxwatch https://<your-host>/api/ops/mcp --header "Authorization: Bearer $FOXWATCH_TOKEN"
+```
+
+A token acts as the operator who made it, with admin access at most: it cannot register secrets, attach one to a new request, manage operators, or make more tokens. Its changes show in **Activity** as `<email> via <token name>`. Each token may run checks or test requests 30 times a minute. Tokens last up to a year, 90 days unless you pick otherwise, and can be revoked at any time. The MCP server takes tokens only, never a browser session. The same token works as a Bearer token on the `/api/ops/*` routes the admin UI uses.
+
 **Status model**
 
 - Check: pass / degraded (latency SLO) / fail

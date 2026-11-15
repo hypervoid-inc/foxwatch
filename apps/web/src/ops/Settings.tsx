@@ -4,7 +4,7 @@ import { api, apiUpload } from "./api.ts";
 import { mutationError } from "./labels.ts";
 import { prepareSiteIcon } from "./prepare-icon.ts";
 import { secretActions } from "./secret-actions.ts";
-import { ConfirmDialog, ErrorText, FoxMark, InfoTip, Seg, useActionFlash } from "./ui.tsx";
+import { ConfirmDialog, CopyPanel, ErrorText, FoxMark, InfoTip, Seg, useActionFlash } from "./ui.tsx";
 
 export type Me = { id: string; email: string; role: "superadmin" | "admin" };
 
@@ -476,7 +476,148 @@ export function Settings({
 
         <OwnPassword />
       </div>
+
+      <div className="settings-row">
+        <ApiTokens me={me} />
+      </div>
     </div>
+  );
+}
+
+type ApiTokenRow = {
+  id: string;
+  name: string;
+  userId: string;
+  email: string;
+  createdAt: number;
+  expiresAt: number;
+  lastUsedAt: number | null;
+};
+
+const TOKEN_DAYS = [
+  { id: "30", label: "30 days" },
+  { id: "90", label: "90 days" },
+  { id: "365", label: "1 year" },
+] as const;
+
+function ApiTokens({ me }: { me: Me }) {
+  const [tokens, setTokens] = useState<ApiTokenRow[]>([]);
+  const [name, setName] = useState("");
+  const [days, setDays] = useState("90");
+  const [created, setCreated] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const [pendingRevoke, setPendingRevoke] = useState<ApiTokenRow | null>(null);
+
+  async function refresh() {
+    const res = await api<{ tokens: ApiTokenRow[] }>("/api/ops/tokens");
+    if (res.ok) setTokens(res.data.tokens);
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setPending(true);
+    const res = await api<{ token: string }>("/api/ops/tokens", { method: "POST", body: JSON.stringify({ name, days: Number(days) }) });
+    setPending(false);
+    if (!res.ok) {
+      setError(res.error);
+      return;
+    }
+    setCreated(res.data.token);
+    setName("");
+    await refresh();
+  }
+
+  async function revoke(id: string) {
+    setError(null);
+    setPending(true);
+    const res = await api(`/api/ops/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+    setPending(false);
+    setPendingRevoke(null);
+    if (!res.ok) {
+      setError(res.error);
+      return;
+    }
+    await refresh();
+  }
+
+  const now = Date.now();
+  const day = (ts: number) => new Date(ts).toLocaleDateString();
+
+  return (
+    <section className="card set-card">
+      <div className="set-card-head">
+        <h2 className="section-title">API tokens</h2>
+        <p className="section-copy">For agents and scripts. A token acts as you, with admin access at most.</p>
+      </div>
+      {tokens.length === 0 ? (
+        <p className="set-empty">No tokens yet.</p>
+      ) : (
+        <ul className="check-sheet">
+          {tokens.map((t) => (
+            <li key={t.id} className="check-row">
+              <span className="min-w-0 flex-1">
+                <span className="set-op-email block">
+                  {t.name}
+                  {t.userId !== me.id ? <span className="font-normal text-muted"> · {t.email}</span> : null}
+                </span>
+                <span className="mt-0.5 block text-xs text-muted">
+                  Created {day(t.createdAt)} · {t.expiresAt <= now ? "Expired" : `Expires ${day(t.expiresAt)}`} ·{" "}
+                  {t.lastUsedAt ? `Used ${day(t.lastUsedAt)}` : "Never used"}
+                </span>
+              </span>
+              <button className="check-quiet check-quiet-bad" type="button" onClick={() => setPendingRevoke(t)}>
+                Revoke
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {created ? <CopyPanel curl={created} onDismiss={() => setCreated(null)} /> : null}
+      <form id="token-add" className="check-sheet" onSubmit={create} aria-label="Create API token">
+        <label className="check-row" htmlFor="token-name">
+          <span className="check-row-k">Name</span>
+          <input
+            id="token-name"
+            className="check-plain"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Claude Code"
+            maxLength={80}
+            autoComplete="off"
+            required
+          />
+        </label>
+        <div className="check-row">
+          <span className="check-row-k" id="token-days-label">
+            Expires
+          </span>
+          <Seg labelledBy="token-days-label" value={days} options={TOKEN_DAYS} onChange={setDays} />
+        </div>
+      </form>
+      <div className="check-form-actions">
+        <button className="btn btn-primary" disabled={pending} type="submit" form="token-add">
+          {pending ? "Creating…" : "Create token"}
+        </button>
+      </div>
+      {error ? <div className="px-[0.9rem]"><ErrorText>{error}</ErrorText></div> : null}
+      <ConfirmDialog
+        open={pendingRevoke != null}
+        title={`Revoke ${pendingRevoke?.name ?? "this token"}?`}
+        body="Anything using it stops working right away."
+        confirmLabel="Revoke token"
+        pending={pending}
+        onCancel={() => setPendingRevoke(null)}
+        onConfirm={() => {
+          if (pendingRevoke) void revoke(pendingRevoke.id);
+        }}
+      />
+    </section>
   );
 }
 

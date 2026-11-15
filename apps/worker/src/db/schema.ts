@@ -150,6 +150,18 @@ export const opsSessions = sqliteTable("ops_sessions", {
   expiresAt: integer("expires_at").notNull(),
 });
 
+export const opsTokens = sqliteTable("ops_tokens", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  name: text("name").notNull(),
+  role: text("role").$type<"admin">().notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  createdAt: integer("created_at").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+  lastUsedAt: integer("last_used_at"),
+  revokedAt: integer("revoked_at"),
+}, (t) => ({ byUser: index("idx_ops_tokens_user").on(t.userId) }));
+
 export const opsAuthThrottle = sqliteTable("ops_auth_throttle", {
   key: text("key").primaryKey(),
   count: integer("count").notNull(),

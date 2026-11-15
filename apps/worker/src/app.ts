@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { drizzle } from "drizzle-orm/d1";
 import { and, desc, eq, inArray, lt, or } from "drizzle-orm";
 import {
@@ -43,7 +43,10 @@ import { brandDiscordChannel, deliverAlert, rememberPublicOrigin } from "./lib/a
 import { loadSecretMap } from "./lib/secret-store.ts";
 import { isResolvableSecret, secretNamesFromCheck, secretRefError, type SecretRefError } from "./lib/secret-policy.ts";
 import { canManageWorkerSecrets, putWorkerSecret, WorkerSecretError } from "./lib/worker-secrets.ts";
+import { createApiToken, listApiTokens, revokeApiToken } from "./auth/tokens.ts";
+import { MCP_PATH, serveMcp, type OpsCall } from "./mcp.ts";
 import {
+  bumpWindow,
   changeOwnPassword,
   clientIp,
   createOperator,
@@ -104,7 +107,9 @@ export function publicCsp(): Promise<string> {
   return publicCspValue;
 }
 
-export const app = new Hono<{ Bindings: Env; Variables: { actor: string; opsRole: OpsRole; opsUserId: string } }>();
+type AppEnv = { Bindings: Env; Variables: { actor: string; opsRole: OpsRole; opsUserId: string; opsTokenId: string } };
+
+export const app = new Hono<AppEnv>();
 
 app.onError((err, c) => {
   console.error(err);
@@ -324,9 +329,15 @@ app.use("/api/ops/*", async (c, next) => {
   if (!csrfOk(c.req.raw)) return fail(c, 403, "forbidden");
   const actor = await authorizeOps(c.req.raw, c.env);
   if (!actor) return fail(c, 401, "auth");
+  // A token cannot mint more tokens or change its owner's password, so a leaked
+  // one can be revoked for good and never locks the owner out.
+  if (actor.tokenId && (c.req.path === "/api/ops/me/password" || c.req.path.startsWith("/api/ops/tokens"))) {
+    return fail(c, 403, "forbidden");
+  }
   c.set("actor", actor.actor);
   c.set("opsRole", actor.role);
   c.set("opsUserId", actor.userId);
+  c.set("opsTokenId", actor.tokenId ?? "");
   // The fallback origin for alert links is only ever taken from a signed-in
   // operator's request, never from anonymous traffic.
   const remember = rememberPublicOrigin(c.env, new URL(c.req.url).origin);
@@ -433,6 +444,51 @@ app.delete("/api/ops/users/:id", async (c) => {
   }
   await audit(c.env, actorOf(c), "delete-user", undefined, { id: c.req.param("id") });
   return c.json({ ok: true });
+});
+
+app.get("/api/ops/tokens", async (c) => {
+  return c.json({ tokens: await listApiTokens(c.env, opsActorOf(c)) });
+});
+
+app.post("/api/ops/tokens", async (c) => {
+  const body = (await readJsonObject(c)) ?? {};
+  const result = await createApiToken(c.env, opsActorOf(c), body.name, body.days);
+  if (!result.ok) return fail(c, 400, result.error);
+  await audit(c.env, actorOf(c), "create-token", undefined, { id: result.apiToken.id, name: result.apiToken.name, expiresAt: result.apiToken.expiresAt });
+  return c.json({ token: result.token, apiToken: result.apiToken });
+});
+
+app.delete("/api/ops/tokens/:id", async (c) => {
+  const id = c.req.param("id");
+  const result = await revokeApiToken(c.env, opsActorOf(c), id);
+  if (!result.ok) return fail(c, 404, result.error);
+  await audit(c.env, actorOf(c), "revoke-token", undefined, { id, name: result.name, userId: result.userId });
+  return c.json({ ok: true });
+});
+
+// Agents connect here with an API token. A browser session is refused, so a web
+// page can never drive these tools with an operator's cookie.
+app.all(MCP_PATH, async (c) => {
+  if (!c.get("opsTokenId")) return fail(c, 401, "token_only");
+  const authorization = c.req.header("Authorization") ?? "";
+  const origin = new URL(c.req.url).origin;
+  let ctx: typeof c.executionCtx | undefined;
+  try {
+    ctx = c.executionCtx;
+  } catch {
+    /* no execution context outside the Worker runtime */
+  }
+  const call: OpsCall = async (method, path, body) => {
+    const headers: Record<string, string> = { authorization };
+    if (body !== undefined) headers["content-type"] = "application/json";
+    const res = await app.fetch(
+      new Request(`${origin}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }),
+      c.env,
+      ctx,
+    );
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  return serveMcp(c.req.raw, call);
 });
 
 app.get("/api/ops/secrets", async (c) => {
@@ -671,6 +727,8 @@ app.post("/api/ops/monitors/:id/run", async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const row = (await db.select().from(schema.monitors).where(eq(schema.monitors.id, id)))[0];
   if (!row) return fail(c, 404, "not_found");
+  const limited = await tokenProbeLimit(c);
+  if (limited) return limited;
   if (row.mutedUntil != null && row.mutedUntil > Date.now()) return c.json({ ok: true, skipped: "muted" });
   const now = Date.now();
   const maintenance = await db.select().from(schema.maintenance).where(eq(schema.maintenance.componentId, row.componentId));
@@ -709,6 +767,8 @@ app.post("/api/ops/monitors/test-request", async (c) => {
   if (check.type !== "http") return fail(c, 400, "invalid");
   const refError = await secretRefErrorFor(c, check);
   if (refError) return fail(c, 403, refError);
+  const limited = await tokenProbeLimit(c);
+  if (limited) return limited;
   // A superadmin naming a new secret registers it, same as saving the check would.
   if (opsActorOf(c).role === "superadmin") await rememberSecretNames(c.env, secretNamesFromCheck(check));
   const secrets = await loadSecretMap(c.env, secretNamesFromCheck(check));
@@ -1165,6 +1225,21 @@ app.post("/api/ops/incidents/:id/updates", async (c) => {
   await publishSnapshot(c.env);
   return c.json({ ok: true });
 });
+
+/** Requests an API token may send through run and test-request per window. */
+export const TOKEN_PROBE_LIMIT = 30;
+const TOKEN_PROBE_WINDOW_MS = 60_000;
+
+/** A 429 once an API token has spent its probe requests for this minute. Sessions are not limited here. */
+async function tokenProbeLimit(c: Context<AppEnv>): Promise<Response | null> {
+  const tokenId = c.get("opsTokenId");
+  if (!tokenId) return null;
+  const now = Date.now();
+  const { count, resetAt } = await bumpWindow(c.env, `token-probe:${tokenId}`, now, TOKEN_PROBE_WINDOW_MS);
+  if (count <= TOKEN_PROBE_LIMIT) return null;
+  c.header("retry-after", String(Math.max(1, Math.ceil((resetAt - now) / 1000))));
+  return fail(c, 429, "rate");
+}
 
 /** Null when the caller may use every secret the check refers to. */
 async function secretRefErrorFor(

@@ -133,6 +133,17 @@ const STATEMENTS = [
   count INTEGER NOT NULL,
   reset_at INTEGER NOT NULL
 )`,
+  `CREATE TABLE IF NOT EXISTS ops_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at INTEGER
+)`,
   `CREATE INDEX IF NOT EXISTS idx_monitors_component ON monitors(component_id)`,
   `CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents(created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_check_runs_monitor_time ON check_runs(monitor_id, checked_at DESC)`,
@@ -144,9 +155,10 @@ const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_incident_updates_incident ON incident_updates(incident_id, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_maintenance_component ON maintenance(component_id, end_at)`,
   `CREATE INDEX IF NOT EXISTS idx_heartbeats_token ON heartbeats(token_hash)`,
+  `CREATE INDEX IF NOT EXISTS idx_ops_tokens_user ON ops_tokens(user_id)`,
 ];
 
-const SCHEMA_VERSION = "9";
+const SCHEMA_VERSION = "10";
 
 // Every file in migrations/, oldest first. ensureSchema and the migrations build
 // the same schema and either may reach a database first. Once ensureSchema has
@@ -164,6 +176,7 @@ export const MIGRATIONS = [
   "0007_auth_pruning.sql",
   "0008_monitor_confirmation.sql",
   "0009_lookup_indexes.sql",
+  "0010_ops_tokens.sql",
 ];
 
 // Same definition Wrangler uses, so its own CREATE TABLE IF NOT EXISTS is a no-op.

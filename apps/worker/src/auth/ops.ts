@@ -3,10 +3,12 @@ import { drizzle } from "drizzle-orm/d1";
 import type { Env } from "../env.ts";
 import * as schema from "../db/schema.ts";
 import { sha256Hex } from "../lib/crypto.ts";
+import { actorFromApiToken, isApiToken } from "./tokens.ts";
 
 export type OpsRole = "superadmin" | "admin";
 
-export type OpsActor = { actor: string; userId: string; role: OpsRole };
+/** `tokenId` is set when the caller signed in with an API token instead of a session. */
+export type OpsActor = { actor: string; userId: string; role: OpsRole; tokenId?: string };
 
 const COOKIE = "foxwatch_ops";
 export const SESSION_MS = 12 * 60 * 60 * 1000;
@@ -26,10 +28,13 @@ function cookieValue(request: Request): string | null {
   return null;
 }
 
-export function sessionTokenFromRequest(request: Request): string {
+export function bearerFromRequest(request: Request): string {
   const header = request.headers.get("Authorization");
-  const bearer = header?.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
-  return bearer || cookieValue(request) || "";
+  return header?.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
+}
+
+export function sessionTokenFromRequest(request: Request): string {
+  return bearerFromRequest(request) || cookieValue(request) || "";
 }
 
 export function opsCookie(token: string, request: Request): string {
@@ -49,7 +54,10 @@ export async function authorizeOps(request: Request, env: Env): Promise<OpsActor
   const tokenHash = await sha256Hex(provided);
   const db = drizzle(env.DB, { schema });
   const session = (await db.select().from(schema.opsSessions).where(eq(schema.opsSessions.tokenHash, tokenHash)))[0];
-  if (!session) return null;
+  if (!session) {
+    // No browser session: an API token, only from the Authorization header, never from the cookie.
+    return isApiToken(provided) && bearerFromRequest(request) === provided ? actorFromApiToken(env, provided) : null;
+  }
   if (session.expiresAt < Date.now()) {
     await db.delete(schema.opsSessions).where(eq(schema.opsSessions.id, session.id));
     return null;

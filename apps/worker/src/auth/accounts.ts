@@ -86,16 +86,21 @@ export function throttleBucket(ip: string, prefixGroups: 3 | 4 = 4): string {
  * so parallel requests each see a different count instead of the same stale read.
  */
 async function bumpThrottle(env: Env, key: string, now: number, windowMs = LOGIN_WINDOW_MS): Promise<number> {
-  const count = await env.DB.prepare(
+  return (await bumpWindow(env, key, now, windowMs)).count;
+}
+
+/** bumpThrottle's count, plus when the key's window ends. */
+export async function bumpWindow(env: Env, key: string, now: number, windowMs: number): Promise<{ count: number; resetAt: number }> {
+  const row = await env.DB.prepare(
     `INSERT INTO ops_auth_throttle (key, count, reset_at) VALUES (?1, 1, ?2)
      ON CONFLICT(key) DO UPDATE SET
        count = CASE WHEN reset_at <= ?3 THEN 1 ELSE count + 1 END,
        reset_at = CASE WHEN reset_at <= ?3 THEN ?2 ELSE reset_at END
-     RETURNING count`,
+     RETURNING count, reset_at`,
   )
     .bind(key, now + windowMs, now)
-    .first<number>("count");
-  return count ?? 1;
+    .first<{ count: number; reset_at: number }>();
+  return { count: row?.count ?? 1, resetAt: row?.reset_at ?? now + windowMs };
 }
 
 function loginKeys(email: string, ip: string): Record<ThrottleScope, string> {
