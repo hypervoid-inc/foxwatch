@@ -205,7 +205,7 @@ export function Checks({
       <aside className="aside-panel flex flex-col gap-5">
         {selected === "new" || editing ? (
           <CheckForm
-            key={selected}
+            key={`form:${selected}`}
             monitor={selected === "new" ? null : editing}
             monitors={monitors}
             secrets={secrets}
@@ -217,9 +217,9 @@ export function Checks({
           <div className="card px-5 py-8 text-center text-sm text-muted">Select a check to edit, or create a new one.</div>
         )}
         {editing?.componentId ? (
-          <MaintenanceCard key={editing.componentId} componentId={editing.componentId} componentName={editing.componentName} onChange={onChange} />
+          <MaintenanceCard key={`maintenance:${editing.componentId}`} componentId={editing.componentId} componentName={editing.componentName} onChange={onChange} />
         ) : null}
-        {editing ? <RunHistory key={editing.id} monitor={editing} /> : null}
+        {editing ? <RunHistory key={`runs:${editing.id}`} monitor={editing} /> : null}
       </aside>
       <ConfirmDialog
         open={pendingDelete != null}
